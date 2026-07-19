@@ -1,0 +1,179 @@
+{
+  "server": {"host": "127.0.0.1", "port": 8765},
+  "email_report": {
+    "enabled": true,
+    "recipient": "26142328@qq.com",
+    "smtp_host": "smtp.qq.com",
+    "smtp_port": 465,
+    "smtp_security": "ssl",
+    "smtp_timeout": 180,
+    "smtp_attempts": 3,
+    "smtp_retry_delay": 60,
+    "image_max_width": 1280,
+    "jpeg_quality": 70,
+    "user_env": "GAMEFLOW_SMTP_USER",
+    "password_env": "GAMEFLOW_SMTP_AUTH_CODE",
+    "screenshots": {
+      "daily_game": "G:\\project_I\\logs\\final.png",
+      "blue_archive_daily": "G:\\project_I\\logs\\blue_archive_final.png",
+      "azur_lane_daily": "G:\\project_I\\logs\\azur_lane_final.png",
+      "naruto_daily": "G:\\project_I\\logs\\naruto_final.png",
+      "gumballs_daily": "G:\\project_I\\logs\\gumballs_final.png",
+      "endfield_daily": "G:\\project_I\\logs\\endfield_final.png",
+      "zenless_daily": "G:\\project_I\\logs\\zenless_final.png",
+      "star_rail_daily": "G:\\project_I\\logs\\star_rail_final.png"
+    }
+  },
+  "tools": {
+    "ldconsole": "E:\\leidian\\LDPlayer9\\ldconsole.exe",
+    "adb": "E:\\leidian\\LDPlayer9\\adb.exe",
+    "maa": "maa",
+    "maa_gui": "E:\\MAA\\MAA-v5.3.1-win-x64\\MAA.exe",
+    "baas_gui": "E:\\baas\\baas-pro\\baas.exe",
+    "alas_gui": "E:\\AzurLaneAutoScript\\Alas.exe",
+    "gumballs_gui": "D:\\bushiyi\\MFAAvalonia.exe",
+    "maaend_gui": "G:\\maazmd\\MaaEnd.exe",
+    "zenless_gui": "E:\\onedragen\\ZZZ\\OneDragon-Launcher.exe",
+    "star_rail_gui": "E:\\March7thAssistant_full\\March7th Launcher.exe"
+  },
+  "discovery": {
+    "ldconsole": [
+      "D:\\leidian\\LDPlayer9\\ldconsole.exe",
+      "G:\\leidian\\LDPlayer9\\ldconsole.exe"
+
+    ],
+    "adb": [
+      "D:\\leidian\\LDPlayer9\\adb.exe",
+      "G:\\leidian\\LDPlayer9\\adb.exe"
+    ],
+    "maa": [
+      "G:\\MAA\\maa.exe",
+      "D:\\MAA\\maa.exe"
+    ],
+    "maa_gui": [
+      "E:\\MAA\\MAA-v5.3.1-win-x64\\MAA.exe"
+    ],
+    "baas_gui": [
+      "E:\\baas\\baas-pro\\baas.exe",
+      "E:\\baas\\Baas_Windows_V4.exe"
+    ],
+    "alas_gui": [
+      "E:\\AzurLaneAutoScript\\Alas.exe"
+    ],
+    "gumballs_gui": [
+      "D:\\bushiyi\\MFAAvalonia.exe"
+    ],
+    "maaend_gui": [
+      "G:\\maazmd\\MaaEnd.exe"
+    ],
+    "zenless_gui": [
+      "E:\\onedragen\\ZZZ\\OneDragon-Launcher.exe"
+    ],
+    "star_rail_gui": [
+      "E:\\March7thAssistant_full\\March7th Launcher.exe"
+    ]
+  },
+  "device": {"address": "127.0.0.1:5555"},
+  "workflows": {
+    "daily_game": {
+      "display_name": "明日方舟每日流程",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "08:00", "enabled": false},
+      "steps": [
+        {"id": "start_emulator", "runner": "ldplayer", "action": "launch", "instance": 1, "timeout": 120, "settle_seconds": 8, "retry": 1},
+        {"id": "wait_for_android", "runner": "adb", "action": "wait", "device": "emulator-5556", "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_maa_daily", "runner": "maa_gui", "executable": "E:\\MAA\\MAA-v5.3.1-win-x64\\MAA.exe", "log_path": "E:\\MAA\\MAA-v5.3.1-win-x64\\debug\\asst.log", "gui_log_path": "E:\\MAA\\MAA-v5.3.1-win-x64\\debug\\gui.log", "restart_grace_seconds": 120, "timeout": 3600, "completion_marker": "AllTasksCompleted", "close_on_complete": true},
+        {"id": "final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5556", "path": "G:\\project_I\\logs\\final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_emulator", "runner": "ldplayer", "action": "quit", "instance": 1, "timeout": 60, "run_always": true}
+      ]
+    },
+    "blue_archive_daily": {
+      "display_name": "碧蓝档案每日流程",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "09:00", "enabled": false},
+      "steps": [
+        {"id": "start_blue_archive_emulator", "runner": "ldplayer", "action": "launch", "instance": 3, "timeout": 120, "settle_seconds": 8, "retry": 1},
+        {"id": "wait_for_blue_archive_android", "runner": "adb", "action": "wait", "device": "emulator-5560", "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_baas_daily", "runner": "baas_gui", "executable": "E:\\baas\\baas-pro\\baas.exe", "process_images": ["Baas_Windows_V4.exe", "baas.exe"], "log_glob": "E:\\baas\\baas-pro\\runtime\\logs\\*_baas1.log", "device": "emulator-5560", "emulator_instance": 3, "max_emulator_restarts": 1, "emulator_ready_timeout": 180, "start_markers": ["日志初始化成功", "开始检查ATX", "模拟器连接成功", "开始执行【"], "completion_marker": "任务全部执行成功", "error_markers": ["任务全部执行失败", "入场券不足"], "recoverable_error_markers": ["RestartTaskException: ATX卡死，重启任务", "ATX卡死，开始重启ATX", "任务卡死，开始重启任务", "重启任务【"], "max_recoverable_events": 3, "recoverable_retry_seconds": 30, "required_last_task": "工作任务", "required_task_check_interval": 600, "completion_quiet_seconds": 20, "startup_timeout": 300, "max_start_clicks": 8, "timeout": 14400, "retry": 1, "retry_delay": 15, "close_on_complete": true, "clean_existing": true, "gui_click_fallback": true, "gui_fallback_after": 30, "gui_fallback_retry_seconds": 30, "gui_window_timeout": 120, "gui_profile_x_ratio": 0.04, "gui_profile_y_ratio": 0.15, "gui_click_x_ratio": 0.374, "gui_click_y_ratio": 0.108},
+        {"id": "blue_archive_final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5560", "path": "G:\\project_I\\logs\\blue_archive_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_blue_archive_emulator", "runner": "ldplayer", "action": "quit", "instance": 3, "timeout": 60, "run_always": true}
+      ]
+    },
+    "azur_lane_daily": {
+      "display_name": "\u78a7\u84dd\u822a\u7ebf\u6bcf\u65e5\u6d41\u7a0b",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "10:00", "enabled": false},
+      "steps": [
+        {"id": "start_azur_lane_emulator", "runner": "mumu_wait", "executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\MuMuManager.exe", "adb_executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\adb.exe", "adb_server_port": 5038, "device": "127.0.0.1:16384", "instance": 0, "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1, "retry_delay": 5},
+        {"id": "run_azur_lane_script", "runner": "alas_gui", "executable": "E:\\AzurLaneAutoScript\\Alas.exe", "process_image": "Alas.exe", "log_glob": "E:\\AzurLaneAutoScript\\log\\*_alas.txt", "env": {"ANDROID_ADB_SERVER_PORT": "5038"}, "start_markers": ["Scheduler: Start task"], "completion_marker": "No task pending", "error_markers": ["No emulator with serial", "无法连接至ADB服务", "Request human takeover", "ScriptError", "GameNotRunningError"], "completion_quiet_seconds": 20, "log_retry_interval": 30, "max_start_clicks": 5, "startup_timeout": 300, "timeout": 7200, "retry": 1, "retry_delay": 10, "clean_existing": true, "close_on_complete": true, "gui_click_fallback": true, "gui_click_x_ratio": 0.43, "gui_click_y_ratio": 0.105},
+        {"id": "connect_azur_lane_adb", "runner": "command", "command": "E:\\AzurLaneAutoScript\\toolkit\\Lib\\site-packages\\adbutils\\binaries\\adb.exe", "args": ["connect", "127.0.0.1:16384"], "env": {"ANDROID_ADB_SERVER_PORT": "5038"}, "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "azur_lane_final_screenshot", "runner": "adb", "action": "screenshot", "executable": "E:\\AzurLaneAutoScript\\toolkit\\Lib\\site-packages\\adbutils\\binaries\\adb.exe", "adb_server_port": 5038, "device": "127.0.0.1:16384", "path": "G:\\project_I\\logs\\azur_lane_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_azur_lane_emulator", "runner": "command", "command": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\MuMuManager.exe", "args": ["control", "--vmindex", "0", "shutdown"], "timeout": 60, "run_always": true}
+      ]
+    },
+    "naruto_daily": {
+      "display_name": "火影忍者每日流程",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "11:00", "enabled": false},
+      "steps": [
+        {"id": "start_naruto_emulator", "runner": "ldplayer", "action": "launch", "instance": 0, "timeout": 120, "settle_seconds": 8, "retry": 1},
+        {"id": "wait_for_naruto_android", "runner": "adb", "action": "wait", "device": "emulator-5554", "package": "com.yy.yfs", "require_launcher": true, "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_naruto_shadow", "runner": "naruto_shadow", "device": "emulator-5554", "shadow_package": "com.yy.yfs", "game_package": "com.tencent.KiHan", "shadow_open_confirm": true, "shadow_open_confirm_point": [360, 936], "tutorial_confirm_point": [360, 936], "tutorial_confirm_attempts": 5, "tutorial_close_wait": 2, "enable_point": [360, 1215], "enable_retry_timeout": 90, "enable_retry_interval": 3, "game_consent_point": [530, 1200], "game_consent_wait": 8, "float_start_x": 293, "float_start_y_offset": 49, "popup_confirm_point": [640, 515], "update_markers": ["需要更新后继续", "请更新客户端", "客户端版本过低", "资源版本过低", "发现新版本", "当前软件不是最新版", "检测到有新版本", "手动更新"], "app_launch_timeout": 90, "start_retry_interval": 8, "start_retry_timeout": 180, "float_menu_wait": 1, "after_start_click_wait": 2, "screenshot_interval": 60, "initial_lobby_timeout": 1800, "one_hour_seconds": 5400, "close_after_lobby_timer": true, "timeout": 21600},
+        {"id": "naruto_final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5554", "path": "G:\\project_I\\logs\\naruto_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_naruto_emulator", "runner": "ldplayer", "action": "quit", "instance": 0, "timeout": 60, "run_always": true}
+      ]
+    },
+    "gumballs_daily": {
+      "display_name": "不思议迷宫每日流程",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "12:00", "enabled": false},
+      "steps": [
+        {"id": "start_gumballs_emulator", "runner": "ldplayer", "action": "launch", "instance": 2, "timeout": 120, "settle_seconds": 8, "retry": 1},
+        {"id": "wait_for_gumballs_android", "runner": "adb", "action": "wait", "device": "emulator-5558", "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_gumballs_twice", "runner": "gumballs_gui", "executable": "D:\\bushiyi\\MFAAvalonia.exe", "process_image": "MFAAvalonia.exe", "log_glob": "D:\\bushiyi\\logs\\log-*.log", "initial_click_delay": 120, "round_start_timeout": 180, "between_round_delay": 3, "start_marker": "用户操作：启动任务", "completion_marker": "任务已全部完成！", "business_silence_timeout": 600, "max_stalled_retries": 1, "stalled_restart_delay": 5, "stalled_relaunch_wait": 5, "gui_click_x_ratio": 0.963, "gui_click_y_ratio": 0.136, "timeout": 14400, "clean_existing": true, "close_on_complete": true},
+        {"id": "gumballs_final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5558", "path": "G:\\project_I\\logs\\gumballs_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_gumballs_emulator", "runner": "ldplayer", "action": "quit", "instance": 2, "timeout": 60, "run_always": true}
+      ]
+    },
+    "endfield_daily": {
+      "display_name": "终末地每日流程",
+      "exclusive_group": "pc_hoyoverse_daily",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "13:00", "enabled": false},
+      "steps": [
+        {"id": "run_endfield_daily", "runner": "maaend_gui", "executable": "G:\\maazmd\\MaaEnd.exe", "process_image": "MaaEnd.exe", "log_glob": "G:\\maazmd\\debug\\20??-??-??-*.log", "framework_log_path": "G:\\maazmd\\debug\\maafw.log", "framework_stall_seconds": 1800, "start_markers": ["手动启动：激活配置并启动任务: 全套日常", "实例 全套日常: 开始执行任务"], "completion_marker": "实例 全套日常: 收尾段切换为 Dummy Controller", "final_submission_marker": "实例 全套日常: 任务已提交, task_ids:", "bring_game_to_front": true, "game_process_image": "Endfield.exe", "game_title_contains": "Endfield", "game_foreground_timeout": 180, "screenshot_path": "G:\\project_I\\logs\\endfield_final.png", "screenshot_wait_seconds": 0, "gui_click_fallback": true, "gui_fallback_after": 45, "gui_click_x_ratio": 0.682, "gui_click_y_ratio": 0.971, "timeout": 10800, "retry": 1, "retry_delay": 15, "clean_existing": true, "close_on_complete": false},
+        {"id": "stop_endfield_game", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "Endfield.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true},
+        {"id": "stop_maaend", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "MaaEnd.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true}
+      ]
+    },
+    "zenless_daily": {
+      "display_name": "绝区零每日流程",
+      "exclusive_group": "pc_hoyoverse_daily",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "14:00", "enabled": false},
+      "steps": [
+        {"id": "run_zenless_daily", "runner": "log_gui_daily", "display_name": "绝区零一条龙", "executable": "E:\\onedragen\\ZZZ\\OneDragon-Launcher.exe", "log_glob": "E:\\onedragen\\ZZZ\\.log\\log.txt", "process_images": ["OneDragon-Launcher.exe", "pythonw.exe"], "cleanup_process_images": ["OneDragon-Launcher.exe"], "title_hints": ["绝区零", "一条龙"], "button_names": ["启动一条龙"], "gui_click_x_ratio": 0.88, "gui_click_y_ratio": 0.92, "initial_click_delay": 8, "log_retry_interval": 30, "start_markers": ["指令[ 一条龙 ] 节点 检测游戏窗口", "指令[ 执行应用组 one_dragon ] 节点 检测游戏窗口"], "completion_markers": ["指令[ 一条龙 ] 执行成功 返回状态 全部结束"], "error_markers": ["指令[ 一条龙 ] 执行失败"], "update_markers": ["存在新版本", "发现新版本", "需要更新后继续", "请更新"], "screenshot_markers": ["返回状态 活跃度已满", "返回状态 日常奖励领取成功"], "state_watchdog_regex": "指令\\[\\s*([^\\]]+)\\s*\\]\\s*节点\\s*(.*?)\\s*->.*?返回状态\\s*(.*)$", "state_stall_seconds": 300, "state_recovery_seconds": 120, "screenshot_path": "G:\\project_I\\logs\\zenless_final.png", "bring_game_to_front": true, "game_process_image": "ZenlessZoneZero.exe", "game_title_contains": "绝区零", "game_foreground_timeout": 180, "completion_quiet_seconds": 3, "timeout": 14400, "clean_existing": true, "close_on_complete": true},
+        {"id": "stop_zenless_game", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "ZenlessZoneZero.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true}
+      ]
+    },
+    "star_rail_daily": {
+      "display_name": "星穹铁道每日流程",
+      "exclusive_group": "pc_hoyoverse_daily",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "15:00", "enabled": false},
+      "steps": [
+        {"id": "run_star_rail_daily", "runner": "log_gui_daily", "display_name": "星穹铁道完整运行", "executable": "E:\\March7thAssistant_full\\March7th Launcher.exe", "log_glob": "E:\\March7thAssistant_full\\logs\\*.log", "process_images": ["March7th Launcher.exe", "March7th Assistant.exe"], "cleanup_process_images": ["March7th Launcher.exe", "March7th Assistant.exe"], "completion_on_worker_exit": ["March7th Assistant.exe"], "worker_exit_requires_evidence": true, "worker_exit_log_grace": 15, "title_hints": ["March7th", "三月七"], "button_names": ["完整运行"], "gui_click_x_ratio": 0.165, "gui_click_y_ratio": 0.82, "initial_click_delay": 8, "log_retry_interval": 30, "start_markers": ["开始运行", "游戏启动："], "completion_markers": ["每日实训已完成", "每日实训奖励完成"], "error_markers": ["完整运行失败", "运行异常终止", "Traceback (most recent call last)"], "update_markers": ["发现新版本", "存在新版本", "需要更新后继续", "请更新"], "screenshot_markers": ["每日实训已完成", "每日实训奖励完成"], "screenshot_path": "G:\\project_I\\logs\\star_rail_final.png", "bring_game_to_front": true, "game_process_image": "StarRail.exe", "game_title_contains": "崩坏：星穹铁道", "game_foreground_timeout": 180, "completion_quiet_seconds": 3, "timeout": 14400, "clean_existing": true, "close_on_complete": true},
+        {"id": "stop_star_rail_game", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "StarRail.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true}
+      ]
+    },
+    "self_test": {
+      "display_name": "程序自检",
+      "once_per_day": false,
+      "trigger": {"enabled": false},
+      "steps": [
+        {"id": "short_wait", "runner": "delay", "seconds": 0.2},
+        {"id": "python_check", "runner": "command", "command": "python", "args": ["--version"], "timeout": 10}
+      ]
+    }
+  }
+}
