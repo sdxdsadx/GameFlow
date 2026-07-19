@@ -1,0 +1,27 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# GameFlow runtime state and evidence
+data/
+logs/
+*.db
+*.db-*
+*.log
+
+# Credentials and local overrides
+.env
+.env.*
+!.env.example
+config/workflow.local.json
+
+# Machine-specific files
+*.lnk
+.vscode/
+.idea/
+
+# Temporary archives and screenshots
+*.zip
+*.png
+*.jpg
+*.jpeg
