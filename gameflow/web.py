@@ -1,10 +1,78 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
 
 from .engine import WorkflowManager
+
+
+class UiPreferences:
+    """Persist web-panel task participation independently from workflow config."""
+
+    def __init__(self, path: Path, workflow_ids: list[str]):
+        self.path = path
+        self.workflow_ids = [item for item in workflow_ids if item != "self_test"]
+        self._lock = threading.Lock()
+        self._value = self._load()
+
+    def _defaults(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "order": list(self.workflow_ids),
+            "max_parallel": 1,
+            "workflows": {item: {"enabled": True} for item in self.workflow_ids},
+        }
+
+    def _normalise(self, value: Any) -> dict[str, Any]:
+        defaults = self._defaults()
+        if not isinstance(value, dict):
+            return defaults
+        saved_order = value.get("order", [])
+        if not isinstance(saved_order, list):
+            saved_order = []
+        order = [item for item in saved_order
+                 if item in self.workflow_ids and saved_order.count(item) == 1]
+        order.extend(item for item in self.workflow_ids if item not in order)
+        raw_workflows = value.get("workflows", {})
+        if not isinstance(raw_workflows, dict):
+            raw_workflows = {}
+        workflows = {}
+        for item in self.workflow_ids:
+            raw_item = raw_workflows.get(item, {})
+            enabled = raw_item.get("enabled", True) if isinstance(raw_item, dict) else True
+            workflows[item] = {"enabled": bool(enabled)}
+        try:
+            max_parallel = max(1, min(int(value.get("max_parallel", 1)), 2))
+        except (TypeError, ValueError):
+            max_parallel = 1
+        return {"version": 1, "order": order, "max_parallel": max_parallel,
+                "workflows": workflows}
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            return self._normalise(json.loads(self.path.read_text(encoding="utf-8")))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return self._defaults()
+
+    def get(self) -> dict[str, Any]:
+        with self._lock:
+            # Return a detached JSON-compatible value so request threads cannot mutate it.
+            return json.loads(json.dumps(self._value, ensure_ascii=False))
+
+    def update(self, value: Any) -> dict[str, Any]:
+        with self._lock:
+            self._value = self._normalise(value)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+            temporary.write_text(json.dumps(self._value, ensure_ascii=False, indent=2) + "\n",
+                                 encoding="utf-8")
+            os.replace(temporary, self.path)
+            return json.loads(json.dumps(self._value, ensure_ascii=False))
 
 
 PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -22,16 +90,242 @@ button,select{font:inherit}button{position:relative;border:0;color:#fff;border-r
 .companion-wrap{position:relative;display:flex;align-items:center;justify-content:center}.speech{position:absolute;right:178px;top:15px;width:125px;padding:9px 11px;background:rgba(255,255,255,.95);color:#4c4269;border-radius:13px 13px 2px 13px;font-size:12px;box-shadow:0 8px 22px rgba(0,0,0,.16);z-index:3}.gacha-card{width:158px;height:174px;padding:0;border:1px solid rgba(255,215,106,.55);border-radius:25px;background:radial-gradient(circle at 50% 38%,rgba(255,230,151,.35),transparent 38%),linear-gradient(145deg,rgba(92,73,195,.65),rgba(39,31,103,.82));box-shadow:0 0 35px rgba(255,198,75,.22),inset 0 0 24px rgba(255,255,255,.08);overflow:hidden;animation:float 4s ease-in-out infinite}.gacha-card:hover{transform:translateY(-5px) scale(1.025);filter:brightness(1.08)}.gacha-card:before{content:"";position:absolute;inset:7px;border:1px solid rgba(255,235,174,.3);border-radius:19px;pointer-events:none}.gacha-avatar{position:absolute;width:146px;height:146px;left:6px;top:3px;object-fit:contain;filter:drop-shadow(0 8px 12px rgba(0,0,0,.35));transition:.35s opacity,.35s transform}.gacha-avatar.anime-avatar{width:142px;height:146px;left:8px;object-fit:cover;object-position:center 18%;border-radius:19px 19px 10px 10px}.gacha-card:hover .gacha-avatar{transform:scale(1.04)}.gacha-info{position:absolute;left:8px;right:8px;bottom:8px;padding:20px 7px 7px;border-radius:0 0 15px 15px;background:linear-gradient(transparent,rgba(11,9,40,.95) 42%);text-align:center}.gacha-stars{color:#ffdf73;font-size:10px;letter-spacing:1px;text-shadow:0 0 9px #ffb84f}.gacha-name{display:block;color:#fff;font-weight:700;font-size:14px;margin-top:1px}.gacha-hint,.gacha-pool{position:absolute;top:8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 6px;border-radius:99px;background:rgba(8,7,31,.72);color:#ffe89a;font:9px "Microsoft YaHei",sans-serif;letter-spacing:.5px;z-index:2}.gacha-hint{right:8px}.gacha-pool{left:8px;color:#80eaff;font-family:Consolas,monospace}.summon-flash{animation:summon .55s ease}@keyframes summon{0%{opacity:.2;transform:scale(.72) rotate(-5deg)}55%{filter:brightness(1.8) drop-shadow(0 0 24px #fff)}100%{opacity:1;transform:none}}
 .layout{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(330px,.75fr);gap:18px;margin-top:18px}.stack{display:flex;flex-direction:column;gap:18px}.card{position:relative;border:1px solid var(--line);border-radius:var(--radius);padding:20px;background:var(--panel);box-shadow:var(--shadow);backdrop-filter:blur(18px);animation:enter .45s ease both}.card-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:15px}.card-title h3{font-size:17px;margin:0}.section-code{font:10px Consolas;color:var(--muted);letter-spacing:2px}.muted{color:var(--muted)}.small{font-size:12px}
 .progress-shell{margin-top:17px}.progress-meta{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-bottom:7px}.progress-track{height:8px;border-radius:99px;background:rgba(100,108,177,.18);overflow:hidden}.progress-fill{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--cyan),var(--violet),var(--pink));box-shadow:0 0 18px var(--violet);transition:width .5s ease}
-#tasks{display:flex;flex-direction:column;gap:9px}.task{--accent:#8d7cff;display:grid;grid-template-columns:20px 28px 48px minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:12px;border:1px solid rgba(141,124,255,.13);border-radius:16px;background:rgba(8,10,31,.35);transition:.2s border-color,.2s transform,.2s background,.2s opacity;cursor:grab}.day .task{background:rgba(255,255,255,.48)}.task:hover{transform:translateX(3px);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 8%,transparent)}.task.is-running{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent),0 0 24px color-mix(in srgb,var(--accent) 18%,transparent)}.task.dragging{opacity:.32;transform:scale(.985)}.task.drop-before{box-shadow:0 -3px 0 var(--cyan),0 -8px 22px rgba(85,220,255,.22)}.task.drop-after{box-shadow:0 3px 0 var(--pink),0 8px 22px rgba(255,102,183,.2)}.drag-handle{color:rgba(170,180,235,.58);font:bold 17px/1 monospace;letter-spacing:-4px;cursor:grab;user-select:none;text-align:center}.drag-handle:active,.task:active{cursor:grabbing}.select-box{appearance:none;width:20px;height:20px;border-radius:7px;border:2px solid rgba(160,169,229,.45);display:grid;place-items:center;cursor:pointer}.select-box:checked{background:linear-gradient(135deg,var(--violet),var(--pink));border-color:transparent}.select-box:checked:after{content:"âœ“";font:bold 13px sans-serif;color:white}.task-icon{width:45px;height:45px;display:grid;place-items:center;border-radius:14px;color:#fff;font-size:20px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 75%,#fff),var(--accent));box-shadow:0 7px 20px color-mix(in srgb,var(--accent) 24%,transparent)}.task-name{font-weight:700}.task-sub{display:block;color:var(--muted);font-size:12px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill{display:inline-flex;align-items:center;gap:5px;margin-left:7px;padding:3px 8px;border-radius:99px;background:rgba(140,148,201,.14);color:var(--muted);font-size:10px}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.running{color:var(--cyan);background:rgba(85,220,255,.12)}.pill.success{color:var(--green)}.pill.failed,.pill.interrupted{color:var(--red)}.task-actions{display:flex;gap:4px}.task-actions button{width:30px;height:30px;padding:0;border-radius:9px}.single button{white-space:nowrap;font-size:12px;padding:8px 10px}
+#tasks{display:flex;flex-direction:column;gap:9px}.task{--accent:#8d7cff;display:grid;grid-template-columns:20px 28px 48px minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:12px;border:1px solid rgba(141,124,255,.13);border-radius:16px;background:rgba(8,10,31,.35);transition:.2s border-color,.2s transform,.2s background,.2s opacity;cursor:grab}.day .task{background:rgba(255,255,255,.48)}.task:hover{transform:translateX(3px);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 8%,transparent)}.task.is-running{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent),0 0 24px color-mix(in srgb,var(--accent) 18%,transparent)}.task.is-disabled{opacity:.62}.task.is-disabled .task-icon{filter:grayscale(.8)}.task.dragging{opacity:.32;transform:scale(.985)}.task.drop-before{box-shadow:0 -3px 0 var(--cyan),0 -8px 22px rgba(85,220,255,.22)}.task.drop-after{box-shadow:0 3px 0 var(--pink),0 8px 22px rgba(255,102,183,.2)}.drag-handle{color:rgba(170,180,235,.58);font:bold 17px/1 monospace;letter-spacing:-4px;cursor:grab;user-select:none;text-align:center}.drag-handle:active,.task:active{cursor:grabbing}.select-box{appearance:none;width:20px;height:20px;border-radius:7px;border:2px solid rgba(160,169,229,.45);display:grid;place-items:center;cursor:pointer}.select-box:checked{background:linear-gradient(135deg,var(--violet),var(--pink));border-color:transparent}.select-box:checked:after{content:"âœ“";font:bold 13px sans-serif;color:white}.task-icon{width:45px;height:45px;display:grid;place-items:center;border-radius:14px;color:#fff;font-size:20px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 75%,#fff),var(--accent));box-shadow:0 7px 20px color-mix(in srgb,var(--accent) 24%,transparent)}.task-name{font-weight:700}.task-sub{display:block;color:var(--muted);font-size:12px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill{display:inline-flex;align-items:center;gap:5px;margin-left:7px;padding:3px 8px;border-radius:99px;background:rgba(140,148,201,.14);color:var(--muted);font-size:10px}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.running{color:var(--cyan);background:rgba(85,220,255,.12)}.pill.success{color:var(--green)}.pill.failed,.pill.interrupted{color:var(--red)}.status-retry{border:0;box-shadow:none;cursor:pointer}.status-retry:hover:not(:disabled){transform:none;filter:brightness(1.25)}.participation{margin-left:6px;padding:3px 8px;border:1px solid currentColor;border-radius:99px;background:transparent;box-shadow:none;font-size:10px}.participation.enabled{color:var(--green)}.participation.skipped{color:var(--yellow)}.participation:hover:not(:disabled){transform:none;background:rgba(255,255,255,.08)}.task-actions,.single{display:flex;gap:4px}.task-actions button{width:30px;height:30px;padding:0;border-radius:9px}.single button{white-space:nowrap;font-size:12px;padding:8px 10px}.single .cancel-one{background:linear-gradient(135deg,#c93e67,#ff616f)}
 .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:16px;padding-top:15px;border-top:1px solid var(--line)}.parallel-control{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;margin-right:auto}select{color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 28px 9px 10px;outline:none}
 .batch-grid{display:grid;grid-template-columns:1fr;gap:9px}.batch-item{position:relative;min-height:82px;padding:13px 14px 12px 45px;border-radius:15px;background:var(--panel2);border:1px solid rgba(142,151,255,.12)}.batch-item:before{position:absolute;left:14px;top:15px;font-size:18px}.batch-item.active:before{content:"âœ¦";color:var(--pink)}.batch-item.queue:before{content:"âŒ›";color:var(--yellow)}.batch-item.done:before{content:"âœ“";color:var(--green)}.batch-item b{font-size:12px}.batch-item p{white-space:pre-line;line-height:1.55;margin:6px 0 0}
 .log-card{grid-column:1/-1}.log-head,.log-tools{display:flex;align-items:center;justify-content:space-between;gap:12px}.log-tools{justify-content:flex-end}.switch{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.log-view{height:350px;overflow:auto;padding:15px 17px;white-space:pre-wrap;word-break:break-all;border:1px solid rgba(85,220,255,.15);border-radius:15px;background:#050711;color:#7df9bf;font:12px/1.65 Consolas,"Microsoft YaHei",monospace;box-shadow:inset 0 0 38px rgba(0,0,0,.5);scrollbar-color:#6655bc transparent}.log-view:before{content:"â—  LIVE LINK";display:block;color:#ff6cae;font-size:10px;letter-spacing:2px;margin-bottom:8px}.log-empty{color:var(--muted)}
 .history{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto}.run{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border:1px solid rgba(142,151,255,.11);border-radius:13px;background:var(--panel2)}.run-main{min-width:0}.run-main b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}.run-state{padding:4px 8px;border-radius:99px;font-size:10px;background:rgba(140,148,201,.12)}.success{color:var(--green)}.failed,.interrupted{color:var(--red)}.skipped{color:var(--yellow)}.empty{color:var(--muted);padding:20px;text-align:center;border:1px dashed var(--line);border-radius:13px}.toast{position:fixed;right:24px;bottom:24px;z-index:20;max-width:min(390px,calc(100% - 48px));padding:14px 18px;border:1px solid rgba(85,220,255,.35);border-radius:14px;background:rgba(15,18,48,.95);color:#fff;box-shadow:0 15px 45px rgba(0,0,0,.4);transform:translateY(90px);opacity:0;transition:.3s}.toast.show{transform:none;opacity:1}.toast.bad{border-color:rgba(255,102,128,.55)}
 .pill.needs_update,.run-state.needs_update{color:var(--yellow)}.pill.cancelled,.run-state.cancelled{color:var(--red)}
+.readiness-bar{position:relative;display:flex;align-items:center;gap:7px;max-width:520px;height:22px;margin-top:7px;padding:0 9px 0 24px;overflow:hidden;border:1px solid rgba(140,148,201,.16);border-radius:8px;background:rgba(91,98,159,.11);color:var(--muted);font-size:10px}.readiness-bar:before{content:"";position:absolute;left:9px;width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.readiness-bar:after{content:"";position:absolute;left:0;bottom:0;width:100%;height:2px;background:currentColor;opacity:.55}.readiness-bar .readiness-label{font-weight:700;letter-spacing:.4px}.readiness-bar .readiness-detail{margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.78}.readiness-bar.success{color:var(--green);background:rgba(97,242,177,.08)}.readiness-bar.running{color:var(--cyan);background:rgba(85,220,255,.08)}.readiness-bar.queued,.readiness-bar.skipped,.readiness-bar.needs_update{color:var(--yellow);background:rgba(255,204,102,.08)}.readiness-bar.failed,.readiness-bar.interrupted,.readiness-bar.cancelled{color:var(--red);background:rgba(255,102,128,.08)}
 @media(max-width:900px){.hero{grid-template-columns:1fr 210px}.speech{display:none}.layout{grid-template-columns:1fr}.log-card{grid-column:auto}}@media(max-width:650px){.shell{width:min(100% - 18px,1260px);margin-top:12px}.clock{display:none}.hero{display:block;padding:22px}.hero h2{font-size:24px}.companion-wrap{display:none}.task{grid-template-columns:18px 25px 42px 1fr}.task-actions,.single{grid-column:4}.task-actions{justify-content:flex-start}.card{padding:15px}.toolbar{align-items:stretch}.parallel-control{width:100%}.primary,.danger{flex:1}.log-head{align-items:flex-start;flex-direction:column}.log-tools{width:100%;justify-content:space-between}.log-view{height:280px}.brand small{letter-spacing:1px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style></head><body><div class="shell">
 <header class="topbar"><div class="brand"><div class="brand-mark">âœ¦</div><div><h1>GameFlow</h1><small>DIMENSIONAL OPERATIONS</small></div></div><div class="top-actions"><div id="clock" class="clock">SYNC --:--:--</div><button class="icon-btn" onclick="toggleTheme()" title="åˆ‡æ¢æ˜¼å¤œä¸»é¢˜">â˜¾</button></div></header>
-<section class="hero"><div><div class="eyebrow">COMMAND CENTER / ONLINE</div><h2>è¯·è¾“å…¥æ–‡æœ¬</h2><p>è¯·è¾“å…¥æ–‡æœ¬</p><div class="hero-status"><span id="statusLight" classÛÍõ¶‰ËkºwµçM¡…É…Ñ•È½±…É”½ˆÌĞĞÜÀµ)ÜÉ1ai	0ÕHá¤¹Á¹œœ±ÅÕ½Ñ”èŸ¢şgš&7’â7šb¿’î’æ#¦¶SšÎW¾ò3šb¿¢«–*£–2[ô°(í¹…µ”èŸš¢Ç–Êo¦êï¢†Œœ±Í•É¥•ÌèŸ¦vKšb—2«–’Ó–ÂG–æĞœ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆÄÈÜÈÈÈµ) Õ¡¡@İÙhİÌÄ¹Á¹œœ±ÅÕ½Ñ”èŸ–"¯–>G–F’ê¾ò3’î+–’§j’îï–*‡¢şcšÊ‡îOšvô°(í¹…µ”èŸ¢Z–ÂS¢:'&äœ±Í•É¥•ÌèŸÒ¯ö_–ÃšÂãšK¢*Ç–n´œ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆäÀÄØä´ÑİÈÅi•¡¹Í…Œà¹Á¹œœ±ÅÕ½Ñ”èŸ–ŞËB¢š2’î“¾ò3–ò–/š&Ÿ¢†3š¾?š^—’îï–*‡ô°(í¹…µ”èŸšƒš€œ±Í•É¥•ÌèŸ’âëú;––÷j’â[V32»’â+–wš<œ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆàäÌØÄµÑÄáAEDÑ5µÁ4¹Á¹œœ±ÅÕ½Ñ”èŸ–Âš¾?š^—’îï–*‡’â–>šÂS–£¦£"¢–BŸ¾òô°(í¹…µ”èŸ¢Ö¯¢Btœ±Í•É¥•ÌèŸ.ó’â;¦šg¢úošZdœ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆÜÌÜÌ´Å	 Á1Õiµ!¹©Áœœ±ÅÕ½Ñ”èŸ’ê“îg¢Ò“.ó¾ò3–öOÛ’â7’òkšr'¦^»¦Šcô°(í¹…µ”èŸ¢vÓ¢vÛ–ş4œ±Í•É¥•ÌèŸ¦²ó·’æ/–"œ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆÄÌØÀÜÀµ5å11á)Í!å!¹Á¹œœ±ÅÕ½Ñ”èŸ¢¾ß–º'–ş¶'–ú’îï–*‡–º3š"Cô°(í¹…µ”èŸÛ¦^£–‹¢Æ–¶@œ±Í•É¥•ÌèŸ¦²ó·’æ/–"œ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆÄÈÜÔÄàµ9I±ÄÅDÅØÅÉ¼¹Á¹œœ±ÅÕ½Ñ”èŸ–RS¾ò’î+–’§’æ’òk¦†ë–"§–º3š"Cô°(í¹…µ”èŸšb¦;"Äœ±Í•É¥•ÌèŸš"Gš:£j–¶§–¶@œ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆÄÜÈÜÔäµY¡(É™EäÈ¹Á¹œœ±ÅÕ½Ñ”èŸ’î+–’§’æ¢š¦^«¦^«–>G–'–rÃ–£–.“¾òô°(í¹…µ”èŸšr'¦¦³–*ƒ–– œ±Í•É¥•ÌèŸš"Gš:£j–¶§–¶@œ±ÕÉ°è¡ÑÑÁÌè¼½ÌĞ¹…¹¥±¥ÍĞ¹¼½™¥±”½…¹¥±¥ÍÑ‘¸½¡…É…Ñ•È½±…É”½ˆÄààÜàÌ´Üİ½Éİ@İÙ9Õ9œ¹Á¹œœ±ÅÕ½Ñ”èŸ–"¯–Â?r/š"G¾ò3š^—–âã’îï–*‡–öOÛ¢÷–º3š"Cô)tì)±•Ğ¡…É…Ñ•ÉA½½°õl¸¸¹‰…Í•¡…É…Ñ•ÉA½½±tì)½¹ÍĞÍÑ…ÑÕÍ9…µ•ÌõíÍÕ•ÍÌèŸš¶–âãîOšv|œ±™…¥±•èŸ–ò–âãîOšv|œ±¹••‘Í}ÕÁ‘…Ñ”èŸ¦r¢ššnÓšZÀœ±Í­¥ÁÁ•èŸ–ŞË¢ŞÏ¢şœ±¥¹Ñ•ÉÉÕÁÑ•èŸ–ŞË’â·šZ´œ±…¹•±±•èŸ–ŞË–>[šÚ œ±ÉÕ¹¹¥¹œèŸ’ösš"c’â´œ±¥‘±”èŸ–ÂÇî¨ôì)±•Ğİ½É­™±½İÌõmt±½É‘•Èõmt±ÕÉÉ•¹ÑMÑ…Ñ•Ìõíô±±•…É¹¡½Èôœœ±±…Ñ•ÍÑ1¥¹•Ìõmt±±…ÍÑ1½Q•áĞôœœ±Ñ½…ÍÑQ¥µ•È±ÕÉÉ•¹Ñ¡…É…Ñ•Èõ¹Õ±°±±…ÍÑ¡…É…Ñ•Èô´Ä±‘É…¥¹%õ¹Õ±°±¥ÍÉ…¥¹œõ™…±Í”ì)½¹ÍĞ€õ¥ôù‘½Õµ•¹Ğ¹•Ñ±•µ•¹Ñ	å%¡¥¤ì)™Õ¹Ñ¥½¸Í…Ù• ¥íÑÉåíÉ•ÑÕÉ¸)M=8¹Á…ÉÍ”¡±½…±MÑ½É…”¹•Ñ%Ñ•´ …µ•™±½Üµ½É‘•Èœ¥ñğmtœ¥õ…Ñ ¡”¥íÉ•ÑÕÉ¹muõô)™Õ¹Ñ¥½¸Á•ÉÍ¥ÍĞ ¥í±½…±MÑ½É…”¹Í•Ñ%Ñ•´ …µ•™±½Üµ½É‘•Èœ±)M=8¹ÍÑÉ¥¹¥™ä¡½É‘•È¤¤í±½…±MÑ½É…”¹Í•Ñ%Ñ•´ …µ•™±½ÜµÁ…É…±±•°œ° Á…É…±±•°œ¤¹Ù…±Õ”¥ô)…Íå¹Œ™Õ¹Ñ¥½¸…Á¤¡ÕÉ°±½ÁĞ¥í±•ĞÈõ…İ…¥Ğ™•Ñ ¡ÕÉ°±½ÁĞ¤±õ…İ…¥ĞÈ¹©Í½¸ ¤í¥˜ …È¹½¬¥Ñ¡É½Ü¹•ÜÉÉ½È¡¹µ•ÍÍ…•ññ¹•ÉÉ½ÉñğŸ¢¾ßšÆ–’Ç¢Ò”œ¤íÉ•ÑÕÉ¸‘ô)™Õ¹Ñ¥½¸±…‰•°¡¥¥í±•ĞÜõİ½É­™±½İÌ¹™¥¹¡àôùà¹¥ôôõ¥¤íÉ•ÑÕÉ¸ÜıÜ¹¹…µ”é¥‘ô)™Õ¹Ñ¥½¸ÁÉ•ÑÑåMÑ…ÑÕÌ¡Ù…±Õ”¥íÉ•ÑÕÉ¸ÍÑ…ÑÕÍ9…µ•ÍmÙ…±Õ•uññÙ…±Õ•ñğŸ–ÂÇî¨ô)™Õ¹Ñ¥½¸¹½Ñ¥™ä¡Ñ•áĞ±‰…õ™…±Í”¥í±•Ğ•°ô Ñ½…ÍĞœ¤í•°¹Ñ•áÑ½¹Ñ•¹ĞõÑ•áĞí•°¹±…ÍÍ9…µ”ôÑ½…ÍĞÍ¡½Üœ¬¡‰…üœ‰…œèœœ¤í±•…ÉQ¥µ•½ÕĞ¡Ñ½…ÍÑQ¥µ•È¤íÑ½…ÍÑQ¥µ•ÈõÍ•ÑQ¥µ•½ÕĞ  ¤ôù•°¹±…ÍÍ9…µ”ôÑ½…ÍĞœ°ĞÈÀÀ¥ô)™Õ¹Ñ¥½¸‘É…İ¡…É…Ñ•È ¥í±•Ğ¥¹‘•àí¥˜¡¡…É…Ñ•ÉA½½°¹±•¹Ñ øÄ¥í‘½í¥¹‘•àõ5…Ñ ¹™±½½È¡5…Ñ ¹É…¹‘½´ ¤©¡…É…Ñ•ÉA½½°¹±•¹Ñ ¥õİ¡¥±”¡¥¹‘•àôôõ±…ÍÑ¡…É…Ñ•È¥õ•±Í”¥¹‘•àôÀí±…ÍÑ¡…É…Ñ•Èõ¥¹‘•àíÕÉÉ•¹Ñ¡…É…Ñ•Èõ¡…É…Ñ•ÉA½½±m¥¹‘•átí±•Ğ¥µœô ½Á•É…Ñ½ÉÙ…Ñ…Èœ¤í¥µœ¹±…ÍÍ1¥ÍĞ¹Ñ½±” …¹¥µ”µ…Ù…Ñ…Èœ°„…ÕÉÉ•¹Ñ¡…É…Ñ•È¹ÕÉ°¤í¥µœ¹±…ÍÍ1¥ÍĞ¹É•µ½Ù” ÍÕµµ½¸µ™±…Í œ¤íÙ½¥¥µœ¹½™™Í•Ñ]¥‘Ñ í¥µœ¹±…ÍÍ1¥ÍĞ¹…‘ ÍÕµµ½¸µ™±…Í œ¤í¥µœ¹½¹•ÉÉ½Èô ¤ôùí¥µœ¹½¹•ÉÉ½Èõ¹Õ±°í¥µœ¹±…ÍÍ1¥ÍĞ¹É•µ½Ù” …¹¥µ”µ…Ù…Ñ…Èœ¤í¥µœ¹ÍÉŒô¡ÑÑÁÌè¼½•¹­„¹¹•Ñİ½É¬½Õ¤½U%}Ù…Ñ…É%½¹}å…­„¹Á¹œôí¥µœ¹ÍÉŒõÕÉÉ•¹Ñ¡…É…Ñ•È¹ÕÉ±ñğ ¡ÑÑÁÌè¼½•¹­„¹¹•Ñİ½É¬½Õ¤½U%}Ù…Ñ…É%½¹|œ­ÕÉÉ•¹Ñ¡…É…Ñ•È¹™¥±”¬œ¹Á¹œœ¤í¥µœ¹…±ĞõÕÉÉ•¹Ñ¡…É…Ñ•È¹¹…µ”¬Ÿ––ÏšŸ¢K¢&Ë–’Ó–<œì ½Á•É…Ñ½É9…µ”œ¤¹Ñ•áÑ½¹Ñ•¹ĞõÕÉÉ•¹Ñ¡…É…Ñ•È¹¹…µ”ì ½Á•É…Ñ½ÉM•É¥•Ìœ¤¹Ñ•áÑ½¹Ñ•¹ĞõÕÉÉ•¹Ñ¡…É…Ñ•È¹Í•É¥•Ìì ½Á•É…Ñ½ÉA½½±M¥é”œ¤¹Ñ•áÑ½¹Ñ•¹ĞôA==0€œ­¡…É…Ñ•ÉA½½°¹±•¹Ñ ì …¡…MÑ…ÉÌœ¤¹Ñ•áÑ½¹Ñ•¹ĞôŸŠbŠbŠbŠbŠbœì ½Á•É…Ñ½ÉMÁ•• œ¤¹Ñ•áÑ½¹Ñ•¹ĞõÕÉÉ•¹Ñ¡…É…Ñ•È¹ÅÕ½Ñ•ô)™Õ¹Ñ¥½¸Í•±•Ñ•‘Q…Í­Ì ¥í±•ĞÍ•±•Ñ•õíôí‘½Õµ•¹Ğ¹ÅÕ•ÉåM•±•Ñ½É±° œÑ…Í­Ì¥¹ÁÕĞœ¤¹™½É… ¡àôùÍ•±•Ñ•‘mà¹‘…Ñ…Í•Ğ¹¥‘tõà¹¡•­•¤íÉ•ÑÕÉ¸Í•±•Ñ•‘ô)™Õ¹Ñ¥½¸É•ÍÑ½É•M•±•Ñ•¡Í•±•Ñ•¥í=‰©•Ğ¹•¹ÑÉ¥•Ì¡Í•±•Ñ•¤¹™½É…  ¡m¥±Ù…±Õ•t¤ôùí±•Ğ¥¹ÁÕĞõ‘½Õµ•¹Ğ¹ÅÕ•ÉåM•±•Ñ½È¡€Ñ…Í­Ì¥¹ÁÕÑm‘…Ñ„µ¥ôˆ‘í¥‘ô‰u€¤í¥˜¡¥¹ÁÕĞ¥¥¹ÁÕĞ¹¡•­•õÙ…±Õ•ô¥ô)™Õ¹Ñ¥½¸±•…ÉÉ½Á5…É­Ì ¥í‘½Õµ•¹Ğ¹ÅÕ•ÉåM•±•Ñ½É±° œ¹Ñ…Í¬œ¤¹™½É… ¡àôùà¹±…ÍÍ1¥ÍĞ¹É•µ½Ù” ‘É½Àµ‰•™½É”œ°‘É½Àµ…™Ñ•Èœ¤¥ô)™Õ¹Ñ¥½¸É•½É‘•ÉQ…Í¬¡Í½ÕÉ”±Ñ…É•Ñ%±‰•™½É”¥í¥˜ …Í½ÕÉ•ññÍ½ÕÉ”ôôõÑ…É•Ñ%¥É•ÑÕÉ¸™…±Í”í±•ĞÍ•±•Ñ•õÍ•±•Ñ•‘Q…Í­Ì ¤±¹•áĞõ½É‘•È¹™¥±Ñ•È¡àôùà„ôõÍ½ÕÉ”¤±Ñ…É•Ğõ¹•áĞ¹¥¹‘•á=˜¡Ñ…É•Ñ%¤í¥˜¡Ñ…É•ĞğÀ¥É•ÑÕÉ¸™…±Í”í¹•áĞ¹ÍÁ±¥”¡Ñ…É•Ğ¬¡‰•™½É”üÀèÄ¤°À±Í½ÕÉ”¤í½É‘•Èõ¹•áĞí‘É…¥¹%õ¹Õ±°í¥ÍÉ…¥¹œõ™…±Í”í±•…ÉÉ½Á5…É­Ì ¤íÉ•¹‘•ÉQ…Í­Ì¡ÕÉÉ•¹ÑMÑ…Ñ•Ì¤íÉ•ÍÑ½É•M•±•Ñ•¡Í•±•Ñ•¤í¹½Ñ¥™ä Ÿò[¦b¦†ë–ê?–ŞËšnÓšZÀœ¤íÉ•ÑÕÉ¸ÑÉÕ•ô)™Õ¹Ñ¥½¸‰¥¹‘Q…Í­É…œ¡É½Ü±¥¥í±•Ğ…Ñ¥Ù”õ™…±Í”±Ñ…É•Ñ%õ¹Õ±°±‰•™½É”õÑÉÕ”í™Õ¹Ñ¥½¸µ½Ù•A½¥¹Ñ•È¡•Ù•¹Ğ¥í¥˜ ……Ñ¥Ù”¥É•ÑÕÉ¸í±•ĞÑ…É•Ğõ‘½Õµ•¹Ğ¹•±•µ•¹ÑÉ½µA½¥¹Ğ¡•Ù•¹Ğ¹±¥•¹Ñ`±•Ù•¹Ğ¹±¥•¹Ñd¤ü¹±½Í•ÍĞ œ¹Ñ…Í¬œ¤í±•…ÉÉ½Á5…É­Ì ¤íÑ…É•Ñ%õ¹Õ±°í¥˜ …Ñ…É•ÑññÑ…É•Ğ¹‘…Ñ…Í•Ğ¹¥ôôõ¥¥É•ÑÕÉ¸í±•ĞÉ•ĞõÑ…É•Ğ¹•Ñ	½Õ¹‘¥¹±¥•¹ÑI•Ğ ¤í‰•™½É”õ•Ù•¹Ğ¹±¥•¹ÑdñÉ•Ğ¹Ñ½À­É•Ğ¹¡•¥¡Ğ¼ÈíÑ…É•Ñ%õÑ…É•Ğ¹‘…Ñ…Í•Ğ¹¥íÑ…É•Ğ¹±…ÍÍ1¥ÍĞ¹…‘¡‰•™½É”ü‘É½Àµ‰•™½É”œè‘É½Àµ…™Ñ•Èœ¥õ™Õ¹Ñ¥½¸™¥¹¥Í ¡½µµ¥Ğ¥í¥˜ ……Ñ¥Ù”¥É•ÑÕÉ¸í‘½Õµ•¹Ğ¹É•µ½Ù•Ù•¹Ñ1¥ÍÑ•¹•È µ½ÕÍ•µ½Ù”œ±µ½Ù•A½¥¹Ñ•È¤í‘½Õµ•¹Ğ¹É•µ½Ù•Ù•¹Ñ1¥ÍÑ•¹•È µ½ÕÍ•ÕÀœ±‘É½ÁA½¥¹Ñ•È¤í¥˜¡½µµ¥Ğ˜™Ñ…É•Ñ%¥É•½É‘•ÉQ…Í¬¡¥±Ñ…É•Ñ%±‰•™½É”¤í…Ñ¥Ù”õ™…±Í”í‘É…¥¹%õ¹Õ±°í¥ÍÉ…¥¹œõ™…±Í”íÑ…É•Ñ%õ¹Õ±°í±•…ÉÉ½Á5…É­Ì ¤íÉ½Ü¹±…ÍÍ1¥ÍĞ¹É•µ½Ù” ‘É…¥¹œœ¥õ™Õ¹Ñ¥½¸‘É½ÁA½¥¹Ñ•È ¥í™¥¹¥Í ¡ÑÉÕ”¥õÉ½Ü¹…‘‘Ù•¹Ñ1¥ÍÑ•¹•È µ½ÕÍ•‘½İ¸œ±•Ù•¹Ğôùí¥˜¡•Ù•¹Ğ¹‰ÕÑÑ½¸„ôôÁññ•Ù•¹Ğ¹Ñ…É•Ğ¹±½Í•ÍĞ ‰ÕÑÑ½¸±¥¹ÁÕĞ±Í•±•Ğ±„œ¤¥É•ÑÕÉ¸í…Ñ¥Ù”õÑÉÕ”í‘É…¥¹%õ¥í¥ÍÉ…¥¹œõÑÉÕ”íÉ½Ü¹±…ÍÍ1¥ÍĞ¹…‘ ‘É…¥¹œœ¤í‘½Õµ•¹Ğ¹…‘‘Ù•¹Ñ1¥ÍÑ•¹•È µ½ÕÍ•µ½Ù”œ±µ½Ù•A½¥¹Ñ•È¤í‘½Õµ•¹Ğ¹…‘‘Ù•¹Ñ1¥ÍÑ•¹•È µ½ÕÍ•ÕÀœ±‘É½ÁA½¥¹Ñ•È±í½¹”éÑÉÕ•ô¤í•Ù•¹Ğ¹ÁÉ•Ù•¹Ñ•™…Õ±Ğ ¥ô¥ô)™Õ¹Ñ¥½¸É•¹‘•ÉQ…Í­Ì¡ÍÑ…Ñ•Ì¥ì Ñ…Í­Ìœ¤¹¥¹¹•É!Q50ôœœí½É‘•È¹™½É…  ¡¥±¤¤ôùí±•ĞÜõİ½É­™±½İÌ¹™¥¹¡àôùà¹¥ôôõ¥¤í¥˜ …Ü¥É•ÑÕÉ¸í±•ĞÍÑ…Ñ”õÍÑ…Ñ•Ím¥‘uññíô±µ•Ñ„õ…µ•5•Ñ…m¥‘uññí¥½¸èŸŠ^œ±½±½ÈèœŒáİ™˜ô±É…ÜõÍÑ…Ñ”¹ÉÕ¹¹¥¹œüÉÕ¹¹¥¹œœè¡ÍÑ…Ñ”¹±…ÍÑ}ÍÑ…ÑÕÍñğ¥‘±”œ¤í±•ĞÉ½Üõ‘½Õµ•¹Ğ¹É•…Ñ•±•µ•¹Ğ ‘¥Øœ¤íÉ½Ü¹±…ÍÍ9…µ”ôÑ…Í¬œ¬¡ÍÑ…Ñ”¹ÉÕ¹¹¥¹œüœ¥ÌµÉÕ¹¹¥¹œœèœœ¤íÉ½Ü¹‘…Ñ…Í•Ğ¹¥õ¥íÉ½Ü¹ÍÑå±”¹Í•ÑAÉ½Á•ÉÑä œ´µ…•¹Ğœ±µ•Ñ„¹½±½È¤íÉ½Ü¹¥¹¹•É!Q50õ€ñÍÁ…¸±…ÍÌô‰‘É…œµ¡…¹‘±”ˆÑ¥Ñ±”ô‹š2'’ö?š.[š.÷¢ÂšVÓ¦†ë–ê<ˆûŠ.»Š.¸ğ½ÍÁ…¸øñ¥¹ÁÕĞ±…ÍÌô‰Í•±•Ğµ‰½àˆÑåÁ”ô‰¡•­‰½àˆ‘…Ñ„µ¥ôˆ‘í¥‘ôˆ¡•­•…É¥„µ±…‰•°ô‹¦'š.¤‘íÜ¹¹…µ•ôˆøñ‘¥Ø±…ÍÌô‰Ñ…Í¬µ¥½¸ˆø‘íµ•Ñ„¹¥½¹ôğ½‘¥Øøñ‘¥ØøñÍÁ…¸±…ÍÌô‰Ñ…Í¬µ¹…µ”ˆø‘íÜ¹¹…µ•ôğ½ÍÁ…¸øñÍÁ…¸±…ÍÌô‰Á¥±°€‘íÉ…İôˆø‘íÁÉ•ÑÑåMÑ…ÑÕÌ¡É…Ü¥ôğ½ÍÁ…¸øñÍÁ…¸±…ÍÌô‰Ñ…Í¬µÍÕˆˆø‘íÍÑ…Ñ”¹ÍÑ•ÀüŸ–öO–&7š¶—¦ª“¾òhœ­ÍÑ…Ñ”¹ÍÑ•Àè¡ÍÑ…Ñ”¹µ•ÍÍ…•ñğŸ¶'–úš2š2—–ºc’â/’îœ¥ôğ½ÍÁ…¸øğ½‘¥Øøñ‘¥Ø±…ÍÌô‰Ñ…Í¬µ…Ñ¥½¹Ìˆøñ‰ÕÑÑ½¸±…ÍÌô‰Í•½¹‘…ÉäˆÑ¥Ñ±”ô‹–BG–&7¢ÂšVĞˆ€‘í¤ôôôÀü‘¥Í…‰±•œèœô½¹±¥¬ô‰µ½Ù” œ‘í¥‘ôœ°´Ä¤ˆûŠDğ½‰ÕÑÑ½¸øñ‰ÕÑÑ½¸±…ÍÌô‰Í•½¹‘…ÉäˆÑ¥Ñ±”ô‹–BG–B;¢ÂšVĞˆ€‘í¤ôôõ½É‘•È¹±•¹Ñ ´Äü‘¥Í…‰±•œèœô½¹±¥¬ô‰µ½Ù” œ‘í¥‘ôœ°Ä¤ˆûŠLğ½‰ÕÑÑ½¸øğ½‘¥Øøñ‘¥Ø±…ÍÌô‰Í¥¹±”ˆøñ‰ÕÑÑ½¸±…ÍÌô‰Í•½¹‘…Éäˆ½¹±¥¬ô‰ÉÕ¹=¹” œ‘í¥‘ôœ¤ˆû–6W¦b–ë–ìğ½‰ÕÑÑ½¸øğ½‘¥Øù€í‰¥¹‘Q…Í­É…œ¡É½Ü±¥¤ì Ñ…Í­Ìœ¤¹…ÁÁ•¹‘¡¥±¡É½Ü¥ô¤íÁ•ÉÍ¥ÍĞ ¥ô)™Õ¹Ñ¥½¸µ½Ù”¡¥±‘•±Ñ„¥í±•ĞÍ•±•Ñ•õÍ•±•Ñ•‘Q…Í­Ì ¤±¤õ½É‘•È¹¥¹‘•á=˜¡¥¤±¨õ¤­‘•±Ñ„í¥˜¡¨ğÁññ¨øõ½É‘•È¹±•¹Ñ ¥É•ÑÕÉ¸ím½É‘•Ém¥t±½É‘•Ém©utõm½É‘•Ém©t±½É‘•Ém¥utíÉ•¹‘•ÉQ…Í­Ì¡ÕÉÉ•¹ÑMÑ…Ñ•Ì¤íÉ•ÍÑ½É•M•±•Ñ•¡Í•±•Ñ•¥ô)™Õ¹Ñ¥½¸É•¹‘•É!¥ÍÑ½Éä¡ÉÕ¹Ì¥ì ¡¥ÍÑ½Éäœ¤¹¥¹¹•É!Q50õÉÕ¹Ì¹±•¹Ñ ıÉÕ¹Ì¹Í±¥” À°ÄÈ¤¹µ…À¡àôù€ñ‘¥Ø±…ÍÌô‰ÉÕ¸ˆøñ‘¥Ø±…ÍÌô‰ÉÕ¸µµ…¥¸ˆøñˆøŒ‘íà¹¥‘ôƒ
-Ü€‘í±…‰•°¡à¹İ½É­™±½Ü¥ôğ½ˆøñÍÁ…¸±…ÍÌô‰Íµ…±°µÕÑ•ˆø‘íà¹ÍÑ…ÉÑ•‘}…ÑñğŸš^Û¦^Óšr«~”ôğ½ÍÁ…¸øğ½‘¥ØøñÍÁ…¸±…ÍÌô‰ÉÕ¸µÍÑ…Ñ”€‘íà¹ÍÑ…ÑÕÍôˆø‘íÁÉ•ÑÑåMÑ…ÑÕÌ¡à¹ÍÑ…ÑÕÌ¥ôğ½ÍÁ…¸øğ½‘¥Øù€¤¹©½¥¸ œœ¤èœñ‘¥Ø±…ÍÌô‰•µÁÑäˆûšjš^ƒ¢†3–*£¢ºÃ–öTğ½‘¥Øøô)…Íå¹Œ™Õ¹Ñ¥½¸É•™É•Í  ¥íÑÉåí±•Ğõ…İ…¥Ğ…Á¤ œ½…Á¤½ÍÑ…ÑÕÌœ¤íİ½É­™±½İÌõ¹İ½É­™±½İÌ¹™¥±Ñ•È¡àôùà¹¥„ôôÍ•±™}Ñ•ÍĞœ¤í¥˜ …½É‘•È¹±•¹Ñ ¥í±•Ğ½±õÍ…Ù• ¤í½É‘•Èõl¸¸¹½±¹™¥±Ñ•È¡àôùİ½É­™±½İÌ¹Í½µ”¡ÜôùÜ¹¥ôôõà¤¤°¸¸¹İ½É­™±½İÌ¹µ…À¡ÜôùÜ¹¥¤¹™¥±Ñ•È¡àôø…½±¹¥¹±Õ‘•Ì¡à¤¥tì Á…É…±±•°œ¤¹Ù…±Õ”õ±½…±MÑ½É…”¹•Ñ%Ñ•´ …µ•™±½ÜµÁ…É…±±•°œ¥ñğœÄõÕÉÉ•¹ÑMÑ…Ñ•Ìõ¹ÍÑ…Ñ”¹İ½É­™±½İÌí¥˜ …¥ÍÉ…¥¹œ¥í±•Ğ¡•­ÌõÍ•±•Ñ•‘Q…Í­Ì ¤íÉ•¹‘•ÉQ…Í­Ì¡ÕÉÉ•¹ÑMÑ…Ñ•Ì¤íÉ•ÍÑ½É•M•±•Ñ•¡¡•­Ì¥õ±•Ğ‰ÕÍäõ¹ÍÑ…Ñ”¹ÉÕ¹¹¥¹œ±‰…Ñ õ¹ÍÑ…Ñ”¹‰…Ñ ±‘½¹”õ‰…Ñ ¹½µÁ±•Ñ•‘ññmtì ¡•…‘±¥¹”œ¤¹Ñ•áÑ½¹Ñ•¹Ğõ‰ÕÍäüŸ’ösš"c’îï–*‡š&Ÿ¢†3’â´œèŸÎïî–ú–F÷’â´œì µ•ÍÍ…”œ¤¹Ñ•áÑ½¹Ñ•¹Ğõ‰…Ñ ¹µ•ÍÍ…•ññ¹ÍÑ…Ñ”¹µ•ÍÍ…”ì ÍÑ…ÑÕÍ1¥¡Ğœ¤¹±…ÍÍ1¥ÍĞ¹Ñ½±” ‰ÕÍäœ±‰ÕÍä¤í¥˜¡ÕÉÉ•¹Ñ¡…É…Ñ•È¤ ½Á•É…Ñ½ÉMÁ•• œ¤¹Ñ•áÑ½¹Ñ•¹Ğõ‰ÕÍäüŸ0œ­ÕÉÉ•¹Ñ¡…É…Ñ•È¹¹…µ”¬Ÿ7š¶–r£–ÏšÎ£šr³š²‡¢†3–*£¾òœéÕÉÉ•¹Ñ¡…É…Ñ•È¹ÅÕ½Ñ”ì …Ñ¥Ù”œ¤¹Ñ•áÑ½¹Ñ•¹Ğô¡‰…Ñ ¹…Ñ¥Ù•ññ¹ÍÑ…Ñ”¹…Ñ¥Ù”¤¹µ…À¡±…‰•°¤¹©½¥¸ Ÿœ¥ñğŸ–öO–&7š^ƒ¦b’ò7–ë–ìœì ÅÕ•Õ•œ¤¹Ñ•áÑ½¹Ñ•¹Ğõ‰…Ñ ¹ÅÕ•Õ”¹µ…À¡±…‰•°¤¹©½¥¸ Ÿœ¥ñğŸ¦b–"_’âë¦èœì ½µÁ±•Ñ•œ¤¹Ñ•áÑ½¹Ñ•¹Ğõ‘½¹”¹µ…À¡àôù±…‰•°¡à¹İ½É­™±½Ü¤¬œƒ
-Ü€œ­ÁÉ•ÑÑåMÑ…ÑÕÌ¡à¹ÍÑ…ÑÕÌ¤¤¹©½¥¸ q¸œ¥ñğŸ¶'–ú¢†3–*£šVÃš6¸œí±•ĞÑ½Ñ…°õ5…Ñ ¹µ…à¡‘½¹”¹±•¹Ñ ­‰…Ñ ¹ÅÕ•Õ”¹±•¹Ñ ¬¡‰…Ñ ¹…Ñ¥Ù•ññmt¤¹±•¹Ñ ±İ½É­™±½İÌ¹±•¹Ñ ¤±™¥¹¥Í¡•õ‘½¹”¹±•¹Ñ ì ÁÉ½É•ÍÍQ•áĞœ¤¹Ñ•áÑ½¹Ñ•¹Ğõ€‘í™¥¹¥Í¡•‘ô€¼€‘íÑ½Ñ…±õ€ì ÁÉ½É•ÍÍ¥±°œ¤¹ÍÑå±”¹İ¥‘Ñ ô¡Ñ½Ñ…°ı5…Ñ ¹µ¥¸ ÄÀÀ±™¥¹¥Í¡•½Ñ½Ñ…°¨ÄÀÀ¤èÀ¤¬œ”œì ÍÑ…ÉÑ…¥±äœ¤¹‘¥Í…‰±•õ‰ÕÍäíÉ•¹‘•É!¥ÍÑ½Éä¡¹ÉÕ¹Íññmt¥õ…Ñ ¡”¥ì ¡•…‘±¥¹”œ¤¹Ñ•áÑ½¹Ñ•¹ĞôŸš2š2—¦Nû¢Ş¿–ò–âàœì µ•ÍÍ…”œ¤¹Ñ•áÑ½¹Ñ•¹Ğõ”¹µ•ÍÍ…”ì ÍÑ…ÑÕÍ1¥¡Ğœ¤¹±…ÍÍ1¥ÍĞ¹…‘ ‰ÕÍäœ¥õô)…Íå¹Œ™Õ¹Ñ¥½¸ÉÕ¹…¥±ä ¥í±•ĞÍ•±•Ñ•õ½É‘•È¹™¥±Ñ•È¡¥ôù‘½Õµ•¹Ğ¹ÅÕ•ÉåM•±•Ñ½È¡¥¹ÁÕÑm‘…Ñ„µ¥ôˆ‘í¥‘ô‰u€¤¹¡•­•¤í¥˜ …Í•±•Ñ•¹±•¹Ñ ¥í¹½Ñ¥™ä Ÿ¢¾ß¢Ï–ÂG¦'š.§’â’â«–ë–ï’îï–*„œ±ÑÉÕ”¤íÉ•ÑÕÉ¹õÁ•ÉÍ¥ÍĞ ¤íÑÉåí±•Ğõ…İ…¥Ğ…Á¤ œ½…Á¤½ÉÕ¸µ‘…¥±äœ±íµ•Ñ¡½èA=MPœ±¡•…‘•ÉÌéì½¹Ñ•¹ĞµQåÁ”œè…ÁÁ±¥…Ñ¥½¸½©Í½¸ô±‰½‘äé)M=8¹ÍÑÉ¥¹¥™ä¡íİ½É­™±½İÌéÍ•±•Ñ•±µ…á}Á…É…±±•°é9Õµ‰•È  Á…É…±±•°œ¤¹Ù…±Õ”¥ô¥ô¤í¹½Ñ¥™ä ŸŠr˜€œ­¹µ•ÍÍ…”¤íÉ•™É•Í  ¥õ…Ñ ¡”¥í¹½Ñ¥™ä¡”¹µ•ÍÍ…”±ÑÉÕ”¥õô)…Íå¹Œ™Õ¹Ñ¥½¸ÉÕ¹=¹”¡¥¥íÑÉåí±•Ğõ…İ…¥Ğ…Á¤ œ½…Á¤½ÉÕ¸ıİ½É­™±½Üôœ­•¹½‘•UI%½µÁ½¹•¹Ğ¡¥¤±íµ•Ñ¡½èA=MPô¤í¹½Ñ¥™ä ŸŠr˜€œ­¹µ•ÍÍ…”¤íÉ•™É•Í  ¥õ…Ñ ¡”¥í¹½Ñ¥™ä¡”¹µ•ÍÍ…”±ÑÉÕ”¥õô)…Íå¹Œ™Õ¹Ñ¥½¸ÍÑ½Á±° ¥íÑÉåí±•Ğõ…İ…¥Ğ…Á¤ œ½…Á¤½ÍÑ½Àœ±íµ•Ñ¡½èA=MPô¤í¹½Ñ¥™ä¡¹µ•ÍÍ…”¤íÉ•™É•Í  ¥õ…Ñ ¡”¥í¹½Ñ¥™ä¡”¹µ•ÍÍ…”±ÑÉÕ”¥õô)…Íå¹Œ™Õ¹Ñ¥½¸É•™É•Í¡1½Ì ¥íÑÉåí±•Ğõ…İ…¥Ğ…Á¤ œ½…Á¤½±½Ìı±¥¹•ÌôÌÀÀœ¤í±…Ñ•ÍÑ1¥¹•Ìõ¹±¥¹•Íññmtí±•ĞÍÑ…ÉĞôÀí¥˜¡±•…É¹¡½È¥í±•Ğ¤õ±…Ñ•ÍÑ1¥¹•Ì¹±…ÍÑ%¹‘•á=˜¡±•…É¹¡½È¤íÍÑ…ÉĞõ¤øôÀı¤¬ÄèÁõ±•ĞÙ¥Í¥‰±”õ±…Ñ•ÍÑ1¥¹•Ì¹Í±¥”¡ÍÑ…ÉĞ¤±Ñ•áĞõÙ¥Í¥‰±”¹±•¹Ñ ıÙ¥Í¥‰±”¹©½¥¸ q¸œ¤èŸšjš^ƒšZÃš^—–ş\œí±•ĞÙ¥•Üô ±½Y¥•Üœ¤±¹•…É	½ÑÑ½´õÙ¥•Ü¹ÍÉ½±±!•¥¡ĞµÙ¥•Ü¹ÍÉ½±±Q½ÀµÙ¥•Ü¹±¥•¹Ñ!•¥¡ĞğĞÔí¥˜¡Ñ•áĞ„ôõ±…ÍÑ1½Q•áĞ¥íÙ¥•Ü¹Ñ•áÑ½¹Ñ•¹ĞõÑ•áĞí¥˜  …ÕÑ½MÉ½±°œ¤¹¡•­•˜™¹•…É	½ÑÑ½´¥Ù¥•Ü¹ÍÉ½±±Q½ÀõÙ¥•Ü¹ÍÉ½±±!•¥¡Ğí±…ÍÑ1½Q•áĞõÑ•áÑõõ…Ñ ¡”¥ì ±½Y¥•Üœ¤¹Ñ•áÑ½¹Ñ•¹ĞôŸš^—–ş_¢¾ï–>[–’Ç¢Ò—¾òhœ­”¹µ•ÍÍ…•õô)™Õ¹Ñ¥½¸±•…É1½Y¥•Ü ¥í±•…É¹¡½Èõ±…Ñ•ÍÑ1¥¹•Ì¹±•¹Ñ ı±…Ñ•ÍÑ1¥¹•Ím±…Ñ•ÍÑ1¥¹•Ì¹±•¹Ñ ´Åtèœœí±…ÍÑ1½Q•áĞôœœì ±½Y¥•Üœ¤¹Ñ•áÑ½¹Ñ•¹ĞôŸî#®¿šbû’ë–ŞËšâ¦ë¾ò3¶'–úšZÃ’ş‡–>ßŠ›Š˜ô)™Õ¹Ñ¥½¸Ñ½±•Q¡•µ” ¥í‘½Õµ•¹Ğ¹‰½‘ä¹±…ÍÍ1¥ÍĞ¹Ñ½±” ‘…äœ¤í±½…±MÑ½É…”¹Í•Ñ%Ñ•´ …µ•™±½Üµ‘…äœ±‘½Õµ•¹Ğ¹‰½‘ä¹±…ÍÍ1¥ÍĞ¹½¹Ñ…¥¹Ì ‘…äœ¤üœÄœèœÀœ¥ô)™Õ¹Ñ¥½¸ÕÁ‘…Ñ•±½¬ ¥í±•Ğ¹½Üõ¹•Ü…Ñ” ¤ì ±½¬œ¤¹Ñ•áÑ½¹Ñ•¹ĞôMe9€œ­¹½Ü¹Ñ½1½…±•Q¥µ•MÑÉ¥¹œ é µ8œ±í¡½ÕÈÄÈé™…±Í•ô¥ô)¥˜¡±½…±MÑ½É…”¹•Ñ%Ñ•´ …µ•™±½Üµ‘…äœ¤ôôôœÄœ¥‘½Õµ•¹Ğ¹‰½‘ä¹±…ÍÍ1¥ÍĞ¹…‘ ‘…äœ¤í‘É…İ¡…É…Ñ•È ¤íÕÁ‘…Ñ•±½¬ ¤íÉ•™É•Í  ¤íÉ•™É•Í¡1½Ì ¤íÍ•Ñ%¹Ñ•ÉÙ…°¡ÕÁ‘…Ñ•±½¬°ÄÀÀÀ¤íÍ•Ñ%¹Ñ•ÉÙ…°¡É•™É•Í °ÄÔÀÀ¤íÍ•Ñ%¹Ñ•ÉÙ…°¡É•™É•Í¡1½Ì°ÄÀÀÀ¤ì(ğ½ÍÉ¥ÁĞøğ½‰½‘äøğ½¡Ñµ°øœœœ(()‘•˜¡…¹‘±•É}™½È¡µ…¹…•Èè]½É­™±½İ5…¹…•È¤è(€€€±…ÍÌ!…¹‘±•È¡	…Í•!QQAI•ÅÕ•ÍÑ!…¹‘±•È¤è(€€€€€€€‘•˜}©Í½¸¡Í•±˜°Ù…±Õ”°ÍÑ…ÑÕÌôÈÀÀ¤è(€€€€€€€€€€€‰½‘ä€ô©Í½¸¹‘ÕµÁÌ¡Ù…±Õ”°•¹ÍÕÉ•}…Í¥¤õ…±Í”¤¹•¹½‘” ‰ÕÑ˜´àˆ¤(€€€€€€€€€€€Í•±˜¹Í•¹‘}É•ÍÁ½¹Í”¡ÍÑ…ÑÕÌ¤(€€€€€€€€€€€Í•±˜¹Í•¹‘}¡•…‘•È ‰½¹Ñ•¹ĞµQåÁ”ˆ°€‰…ÁÁ±¥…Ñ¥½¸½©Í½¸ì¡…ÉÍ•ĞõÕÑ˜´àˆ¤(€€€€€€€€€€€Í•±˜¹Í•¹‘}¡•…‘•È ‰½¹Ñ•¹Ğµ1•¹Ñ ˆ°ÍÑÈ¡±•¸¡‰½‘ä¤¤¤(€€€€€€€€€€€Í•±˜¹•¹‘}¡•…‘•ÉÌ ¤(€€€€€€€€€€€Í•±˜¹İ™¥±”¹İÉ¥Ñ”¡‰½‘ä¤((€€€€€€€‘•˜}‰½‘ä¡Í•±˜¤è(€€€€€€€€€€€±•¹Ñ €ô¥¹Ğ¡Í•±˜¹¡•…‘•ÉÌ¹•Ğ ‰½¹Ñ•¹Ğµ1•¹Ñ ˆ°€ˆÀˆ¤¤(€€€€€€€€€€€É•ÑÕÉ¸©Í½¸¹±½…‘Ì¡Í•±˜¹É™¥±”¹É•…¡±•¹Ñ ¤¹‘•½‘” ‰ÕÑ˜´àˆ¤¤¥˜±•¹Ñ •±Í”íô((€€€€€€€‘•˜‘½}P¡Í•±˜¤è(€€€€€€€€€€€Á…ÉÍ•€ôÕÉ±±¥ˆ¹Á…ÉÍ”¹ÕÉ±Á…ÉÍ”¡Í•±˜¹Á…Ñ ¤(€€€€€€€€€€€¥˜Á…ÉÍ•¹Á…Ñ €ôô€ˆ¼ˆè(€€€€€€€€€€€€€€€‰½‘ä€ôA¹•¹½‘” ‰ÕÑ˜´àˆ¤(€€€€€€€€€€€€€€€Í•±˜¹Í•¹‘}É•ÍÁ½¹Í” ÈÀÀ¤(€€€€€€€€€€€€€€€Í•±˜¹Í•¹‘}¡•…‘•È ‰½¹Ñ•¹ĞµQåÁ”ˆ°€‰Ñ•áĞ½¡Ñµ°ì¡…ÉÍ•ĞõÕÑ˜´àˆ¤(€€€€€€€€€€€€€€€Í•±˜¹Í•¹‘}¡•…‘•È ‰½¹Ñ•¹Ğµ1•¹Ñ ˆ°ÍÑÈ¡±•¸¡‰½‘ä¤¤¤(€€€€€€€€€€€€€€€Í•±˜¹•¹‘}¡•…‘•ÉÌ ¤(€€€€€€€€€€€€€€€Í•±˜¹İ™¥±”¹İÉ¥Ñ”¡‰½‘ä¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸(€€€€€€€€€€€¥˜Á…ÉÍ•¹Á…Ñ €ôô€ˆ½…Á¤½ÍÑ…ÑÕÌˆè(€€€€€€€€€€€€€€€İ½É­™±½İÌ€ômì‰¥ˆè­•ä°€‰¹…µ”ˆèÙ…±Õ”¹•Ğ ‰‘¥ÍÁ±…å}¹…µ”ˆ°­•ä¥ô(€€€€€€€€€€€€€€€€€€€€€€€€€€€€™½È­•ä°Ù…±Õ”¥¸µ…¹…•È¹½¹™¥l‰İ½É­™±½İÌ‰t¹¥Ñ•µÌ ¥t(€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰ÍÑ…Ñ”ˆèµ…¹…•È¹ÍÑ…Ñ” ¤°€‰İ½É­™±½İÌˆèİ½É­™±½İÌ°(€€€€€€€€€€€€€€€€€€€€€€€€€€€€‰ÉÕ¹Ìˆèµ…¹…•È¹ÍÑ½É”¹É••¹Ğ ¥ô¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸(€€€€€€€€€€€¥˜Á…ÉÍ•¹Á…Ñ €ôô€ˆ½…Á¤½±½Ìˆè(€€€€€€€€€€€€€€€ÅÕ•Éä€ôÕÉ±±¥ˆ¹Á…ÉÍ”¹Á…ÉÍ•}ÅÌ¡Á…ÉÍ•¹ÅÕ•Éä¤(€€€€€€€€€€€€€€€ÑÉäè(€€€€€€€€€€€€€€€€€€€½Õ¹Ğ€ôµ…à ÈÀ°µ¥¸¡¥¹Ğ¡ÅÕ•Éä¹•Ğ ‰±¥¹•Ìˆ°lˆÌÀÀ‰t¥lÁt¤°€ÄÀÀÀ¤¤(€€€€€€€€€€€€€€€•á•ÁĞY…±Õ•ÉÉ½Èè(€€€€€€€€€€€€€€€€€€€½Õ¹Ğ€ô€ÌÀÀ(€€€€€€€€€€€€€€€±½}Á…Ñ €ôµ…¹…•È¹É½½Ğ€¼€‰±½Ìˆ€¼€‰…µ•™±½Ü¹±½œˆ(€€€€€€€€€€€€€€€±¥¹•Ì€ômt(€€€€€€€€€€€€€€€¥˜±½}Á…Ñ ¹•á¥ÍÑÌ ¤è(€€€€€€€€€€€€€€€€€€€İ¥Ñ ±½}Á…Ñ ¹½Á•¸ ‰Éˆˆ¤…Ì¡…¹‘±”è(€€€€€€€€€€€€€€€€€€€€€€€¡…¹‘±”¹Í••¬ À°€È¤(€€€€€€€€€€€€€€€€€€€€€€€Í¥é”€ô¡…¹‘±”¹Ñ•±° ¤(€€€€€€€€€€€€€€€€€€€€€€€¡…¹‘±”¹Í••¬¡µ…à À°Í¥é”€´€ÈØÈÄĞĞ¤¤(€€€€€€€€€€€€€€€€€€€€€€€Ñ•áĞ€ô¡…¹‘±”¹É•… ¤¹‘•½‘” ‰ÕÑ˜´àˆ°•ÉÉ½ÉÌô‰É•Á±…”ˆ¤(€€€€€€€€€€€€€€€€€€€±¥¹•Ì€ôÑ•áĞ¹ÍÁ±¥Ñ±¥¹•Ì ¥lµ½Õ¹Ğét(€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰±¥¹•Ìˆè±¥¹•Íô¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸(€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰•ÉÉ½Èˆè€‰¹½Ğ™½Õ¹‰ô°€ĞÀĞ¤((€€€€€€€‘•˜‘½}A=MP¡Í•±˜¤è(€€€€€€€€€€€Á…ÉÍ•€ôÕÉ±±¥ˆ¹Á…ÉÍ”¹ÕÉ±Á…ÉÍ”¡Í•±˜¹Á…Ñ ¤(€€€€€€€€€€€¥˜Á…ÉÍ•¹Á…Ñ €ôô€ˆ½…Á¤½ÉÕ¸ˆè(€€€€€€€€€€€€€€€ÅÕ•Éä€ôÕÉ±±¥ˆ¹Á…ÉÍ”¹Á…ÉÍ•}ÅÌ¡Á…ÉÍ•¹ÅÕ•Éä¤(€€€€€€€€€€€€€€€İ½É­™±½Ü€ôÅÕ•Éä¹•Ğ ‰İ½É­™±½Üˆ°lˆ‰t¥lÁt(€€€€€€€€€€€€€€€™½É”€ôÅÕ•Éä¹•Ğ ‰™½É”ˆ°l‰™…±Í”‰t¥lÁt¹±½İ•È ¤€ôô€‰ÑÉÕ”ˆ(€€€€€€€€€€€€€€€½¬°µ•ÍÍ…”€ôµ…¹…•È¹ÍÑ…ÉĞ¡İ½É­™±½Ü°€‰µ…¹Õ…°ˆ°™½É”¤(€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰½¬ˆè½¬°€‰µ•ÍÍ…”ˆèµ•ÍÍ…•ô°€ÈÀÀ¥˜½¬•±Í”€ĞÀä¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸(€€€€€€€€€€€¥˜Á…ÉÍ•¹Á…Ñ €ôô€ˆ½…Á¤½ÉÕ¸µ‘…¥±äˆè(€€€€€€€€€€€€€€€ÑÉäè(€€€€€€€€€€€€€€€€€€€‰½‘ä€ôÍ•±˜¹}‰½‘ä ¤(€€€€€€€€€€€€€€€€€€€½¬°µ•ÍÍ…”€ôµ…¹…•È¹ÍÑ…ÉÑ}‘…¥±ä¡‰½‘ä¹•Ğ ‰İ½É­™±½İÌˆ°mt¤°(€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€‰½‘ä¹•Ğ ‰µ…á}Á…É…±±•°ˆ°€Ä¤°(€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€‰½½°¡‰½‘ä¹•Ğ ‰™½É”ˆ°…±Í”¤¤¤(€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰½¬ˆè½¬°€‰µ•ÍÍ…”ˆèµ•ÍÍ…•ô°€ÈÀÀ¥˜½¬•±Í”€ĞÀä¤(€€€€€€€€€€€€€€€•á•ÁĞ€¡Y…±Õ•ÉÉ½È°QåÁ•ÉÉ½È°©Í½¸¹)M=9•½‘•ÉÉ½È¤…Ì•áŒè(€€€€€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰½¬ˆè…±Í”°€‰µ•ÍÍ…”ˆè˜‹¢¾ßšÆš‚ó–ò?¦Rg¢¾¿¾òií•áô‰ô°€ĞÀÀ¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸(€€€€€€€€€€€¥˜Á…ÉÍ•¹Á…Ñ €ôô€ˆ½…Á¤½ÍÑ½Àˆè(€€€€€€€€€€€€€€€½¬°µ•ÍÍ…”€ôµ…¹…•È¹ÍÑ½À ¤(€€€€€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰½¬ˆè½¬°€‰µ•ÍÍ…”ˆèµ•ÍÍ…•ô°€ÈÀÀ¥˜½¬•±Í”€ĞÀä¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸(€€€€€€€€€€€Í•±˜¹}©Í½¸¡ì‰•ÉÉ½Èˆè€‰¹½Ğ™½Õ¹‰ô°€ĞÀĞ¤((€€€€€€€‘•˜±½}µ•ÍÍ…”¡Í•±˜°™µĞ°€©…ÉÌ¤è(€€€€€€€€€€€É•ÑÕÉ¸(€€€É•ÑÕÉ¸!…¹‘±•È(()‘•˜Í•ÉÙ”¡µ…¹…•Èè]½É­™±½İ5…¹…•È°¡½ÍĞèÍÑÈ°Á½ÉĞè¥¹Ğ¤è(€€€Q¡É•…‘¥¹!QQAM•ÉÙ•È ¡¡½ÍĞ°Á½ÉĞ¤°¡…¹‘±•É}™½È¡µ…¹…•È¤¤¹Í•ÉÙ•}™½É•Ù•È ¤(
+<section class="hero"><div><div class="eyebrow">COMMAND CENTER / ONLINE</div><h2>è¯·è¾“å…¥æ–‡æœ¬</h2><p>è¯·è¾“å…¥æ–‡æœ¬</p><div class="hero-status"><span id="statusLight" class="status-light"></span><span id="headline">æ­£åœ¨è¿æ¥æŒ‡æŒ¥ç³»ç»Ÿâ€¦â€¦</span></div><div id="message" class="hero-message">æ­£åœ¨è¯»å–ä»»åŠ¡çŠ¶æ€</div><div class="progress-shell"><div class="progress-meta"><span>ä»Šæ—¥è¿›åº¦</span><span id="progressText">0 / 0</span></div><div class="progress-track"><div id="progressFill" class="progress-fill"></div></div></div></div>
+<div class="companion-wrap"><div id="operatorSpeech" class="speech">æ­£åœ¨è¿æ¥ç¥ˆæ„¿æ± â€¦â€¦</div><button class="gacha-card" onclick="drawCharacter()" title="ç‚¹å‡»é‡æ–°å¬å”¤å¥³æ€§è§’è‰²"><span id="operatorPoolSize" class="gacha-pool">POOL 50</span><span id="operatorSeries" class="gacha-hint">RANDOM PICK</span><img id="operatorAvatar" class="gacha-avatar" alt="éšæœºå¥³æ€§æ¸¸æˆæˆ–ç•ªå‰§è§’è‰²å¤´åƒ"><span class="gacha-info"><span id="gachaStars" class="gacha-stars">â˜…â˜…â˜…â˜…â˜…</span><span id="operatorName" class="gacha-name">å¬å”¤ä¸­</span></span></button></div></section>
+<main class="layout"><div class="stack"><section class="card"><div class="card-title"><div><span class="section-code">SQUAD FORMATION</span><h3>æ¯æ—¥ä»»åŠ¡ç¼–é˜Ÿ</h3></div><span class="muted small">æŒ‰ä½ä»»åŠ¡å¡ç‰‡ç›´æ¥æ‹–æ‹½ Â· â†‘â†“ ä¹Ÿå¯å¾®è°ƒ</span></div><div id="tasks"></div><div class="toolbar"><label class="parallel-control">åŒæ­¥å‡ºå‡»ä¸Šé™ <select id="parallel"><option value="1">1 é˜Ÿ Â· é¡ºåºæ‰§è¡Œ</option><option value="2">2 é˜Ÿ Â· å¹¶è¡Œæ‰§è¡Œ</option></select></label><button id="startDaily" class="primary" onclick="runDaily()">âœ¦ å¼€å§‹æ¯æ—¥ä½œæˆ˜</button><button class="danger" onclick="stopAll()">ç»ˆæ­¢è¡ŒåŠ¨</button></div></section></div>
+<aside class="stack"><section class="card"><div class="card-title"><div><span class="section-code">MISSION TELEMETRY</span><h3>å®æ—¶æˆ˜å†µ</h3></div></div><div class="batch-grid"><div class="batch-item active"><b>æ­£åœ¨è¡ŒåŠ¨</b><p id="active" class="small muted">æ— </p></div><div class="batch-item queue"><b>å¾…å‘½é˜Ÿåˆ—</b><p id="queued" class="small muted">æ— </p></div><div class="batch-item done"><b>è¡ŒåŠ¨æŠ¥å‘Š</b><p id="completed" class="small muted">æ— </p></div></div></section><section class="card"><div class="card-title"><div><span class="section-code">ARCHIVE</span><h3>æœ€è¿‘è¡ŒåŠ¨è®°å½•</h3></div></div><div id="history" class="history"></div></section></aside>
+<section class="card log-card"><div class="card-title log-head"><div><span class="section-code">NEURAL LINK / STREAM</span><h3>å®æ—¶è¿è¡Œæ—¥å¿—</h3></div><div class="log-tools"><label class="switch"><input id="autoScroll" type="checkbox" checked>è·Ÿéšæœ€æ–°ä¿¡å·</label><button class="secondary" onclick="clearLogView()">æ¸…ç©ºç»ˆç«¯</button></div></div><div id="logView" class="log-view"><span class="log-empty">ç­‰å¾…ä»»åŠ¡æ—¥å¿—â€¦â€¦</span></div></section></main></div><div id="toast" class="toast"></div>
+<script>
+const gameMeta={daily_game:{icon:'â™œ',color:'#7e8cff'},blue_archive_daily:{icon:'âœ¦',color:'#55cfff'},azur_lane_daily:{icon:'âš“',color:'#4f91ff'},naruto_daily:{icon:'å¿',color:'#ff765f'},gumballs_daily:{icon:'â—ˆ',color:'#bd77ff'},endfield_daily:{icon:'â¬¡',color:'#65e2b6'},zenless_daily:{icon:'Z',color:'#f3d85c'},star_rail_daily:{icon:'è½¨',color:'#8e7dff'}};
+const baseCharacterPool=[
+ {name:'èƒ¡æ¡ƒ',file:'Hutao',series:'åŸç¥',quote:'ä¸å¦‚ç”±æˆ‘æ¥é€ä½ ä¸€ç¨‹ï¼Ÿä»Šå¤©ä¹Ÿè¦å…¨å‹¤ï¼'},
+ {name:'ç¥é‡Œç»«å',file:'Ayaka',series:'åŸç¥',quote:'è‹¥çŸ¥æ˜¯æ¢¦ï¼Œä½•é¡»é†’æ¥ã€‚ä»Šæ—¥è¡ŒåŠ¨è¯·äº¤ç»™æˆ‘ã€‚'},
+ {name:'çº³è¥¿å¦²',file:'Nahida',series:'åŸç¥',quote:'çŸ¥è¯†ä¸ä½ åˆ†äº«ï¼Œä»»åŠ¡ä¹Ÿä¸€èµ·å®Œæˆå§ã€‚'},
+ {name:'èŠ™å®å¨œ',file:'Furina',series:'åŸç¥',quote:'èšå…‰ç¯å·²ç»å°±ä½ï¼Œç²¾å½©çš„è¡ŒåŠ¨è¦å¼€å§‹äº†ï¼'},
+ {name:'å¦®éœ²',file:'Nilou',series:'åŸç¥',quote:'è®©ä»Šå¤©çš„ä»»åŠ¡åƒèˆæ­¥ä¸€æ ·é¡ºåˆ©å§ã€‚'},
+ {name:'å¤œå…°',file:'Yelan',series:'åŸç¥',quote:'æƒ…æŠ¥å·²ç¡®è®¤ï¼Œæ¥ä¸‹æ¥åªéœ€ç­‰å¾…ç»“æœã€‚'},
+ {name:'åˆ»æ™´',file:'Keqing',series:'åŸç¥',quote:'æ—¶é—´å®è´µï¼Œç°åœ¨å°±å¼€å§‹ä»Šæ—¥è¡ŒåŠ¨ã€‚'},
+ {name:'è«å¨œ',file:'Mona',series:'åŸç¥',quote:'å‘½è¿çš„è½¨è¿¹æ˜¾ç¤ºï¼Œä»Šå¤©ä¼šé¡ºåˆ©å®Œæˆã€‚'},
+ {name:'é›·ç”µå°†å†›',file:'Shougun',series:'åŸç¥',quote:'æ—¢æ˜¯ä»Šæ—¥ä¹‹äº‹ï¼Œä¾¿ä¸åº”ç•™å¾…æ˜æ—¥ã€‚'},
+ {name:'å…«é‡ç¥å­',file:'Yae',series:'åŸç¥',quote:'å‘µï¼Œè¿™ç‚¹æ—¥å¸¸ä¹Ÿå€¼å¾—çƒ¦æ¼ï¼Ÿäº¤ç»™è‡ªåŠ¨åŒ–ä¾¿æ˜¯ã€‚'},
+ {name:'ç”˜é›¨',file:'Ganyu',series:'åŸç¥',quote:'ä»Šæ—¥çš„å·¥ä½œæ¸…å•å·²ç»æ•´ç†å¥½äº†ï¼Œè¯·é€é¡¹ç¡®è®¤ã€‚'},
+ {name:'å¯è‰',file:'Klee',series:'åŸç¥',quote:'å¯è‰ä»Šå¤©ä¸å»ç‚¸é±¼ï¼Œå…ˆæŠŠæ¯æ—¥ä»»åŠ¡åšå®Œï¼'},
+ {name:'èŠ­èŠ­æ‹‰',file:'Barbara',series:'åŸç¥',quote:'èŠ­èŠ­æ‹‰ä¼šä¸ºä½ åŠ æ²¹çš„ï¼Œä»Šå¤©ä¹Ÿè¦æ‰“èµ·ç²¾ç¥å“¦ï¼'},
+ {name:'ç´',file:'Qin',series:'åŸç¥',quote:'ä»Šæ—¥çš„äº‹åŠ¡ä¸èƒ½ç§¯å‹ï¼Œæˆ‘ä»¬æŒ‰è®¡åˆ’å®Œæˆã€‚'},
+ {name:'ä¸½è',file:'Lisa',series:'åŸç¥',quote:'å°å¯çˆ±ï¼Œå·æ‡’ä¹‹å‰ï¼Œå…ˆæŠŠä»Šå¤©çš„äº‹æƒ…å¤„ç†å®Œå§ã€‚'},
+ {name:'å®‰æŸ',file:'Ambor',series:'åŸç¥',quote:'ä¾¦å¯Ÿéª‘å£«å‡†å¤‡å®Œæ¯•ï¼Œä¸€èµ·å‡ºå‘å§ï¼'},
+ {name:'è²è°¢å°”',file:'Fischl',series:'åŸç¥',quote:'æ–­ç½ªä¹‹çš‡å¥³å·²é™ä¸‹è°•æ—¨â€”â€”ä»Šæ—¥å§”æ‰˜ï¼Œä¸€é¡¹ä¸ç•™ï¼'},
+ {name:'ç ‚ç³–',file:'Sucrose',series:'åŸç¥',quote:'å‚æ•°è®°å½•å®Œæˆâ€¦â€¦æ¥ä¸‹æ¥è§‚å¯Ÿè‡ªåŠ¨æµç¨‹çš„ç»“æœã€‚'},
+ {name:'è¯ºè‰¾å°”',file:'Noel',series:'åŸç¥',quote:'äº¤ç»™è¯ºè‰¾å°”å§ï¼Œæˆ‘ä¼šæŠŠæ¯ä¸€é¡¹éƒ½å¦¥å–„å®Œæˆã€‚'},
+ {name:'è¿ªå¥¥å¨œ',file:'Diona',series:'åŸç¥',quote:'æˆ‘ã€æˆ‘æ‰ä¸æ˜¯ç‰¹æ„æ¥å¸®å¿™çš„ï¼å¿«ç‚¹æŠŠæ—¥å¸¸åšå®Œå•¦ï¼'},
+ {name:'ç½—èè‰äºš',file:'Rosaria',series:'åŸç¥',quote:'åªè¦æŒ‰æ—¶å®Œæˆå·¥ä½œå°±è¡Œï¼Œæ²¡å¿…è¦å¤šæµªè´¹æ—¶é—´ã€‚'},
+ {name:'ä¼˜èˆ',file:'Eula',series:'åŸç¥',quote:'æŠŠä»»åŠ¡æ‹–åˆ°æ˜å¤©ï¼Ÿè¿™ä¸ªä»‡ï¼Œæˆ‘å¯è®°ä¸‹äº†ã€‚'},
+ {name:'çŠç‘šå®«å¿ƒæµ·',file:'Kokomi',series:'åŸç¥',quote:'èƒ½æºå’Œæ—¶é—´éƒ½è¦åˆç†åˆ†é…ï¼ŒæŒ‰æ—¢å®šæ–¹æ¡ˆæ‰§è¡Œå§ã€‚'},
+ {name:'å®µå®«',file:'Yoimiya',series:'åŸç¥',quote:'æ—¥å¸¸ä¹Ÿè¦åƒçƒŸèŠ±ä¸€æ ·ï¼Œå¹²è„†åˆæ¼‚äº®åœ°æ”¶å°¾ï¼'},
+ {name:'æ—©æŸš',file:'Sayu',series:'åŸç¥',quote:'ä»»åŠ¡è‡ªåŠ¨å®Œæˆçš„è¯â€¦â€¦æˆ‘å°±èƒ½å¤šç¡ä¸€ä¼šå„¿äº†ã€‚'},
+ {name:'æŸ¯è±',file:'Collei',series:'åŸç¥',quote:'æˆ‘ä¼šè®¤çœŸå¸®å¿™çš„â€¦â€¦ä»Šå¤©ä¹Ÿä¸€èµ·åŠ æ²¹å§ã€‚'},
+ {name:'è¿ªå¸Œé›…',file:'Dehya',series:'åŸç¥',quote:'æ”¾å¿ƒäº¤ç»™æˆ‘ï¼Œæ‹¿äº†å§”æ‰˜å°±ä¸€å®šåŠåˆ°åº•ã€‚'},
+ {name:'åè’‚ä¸',file:'Candace',series:'åŸç¥',quote:'ä¸€åˆ‡éƒ½å·²å®‰æ’å¦¥å½“ï¼Œå®‰å¿ƒå®Œæˆä»Šå¤©çš„è¡Œç¨‹å§ã€‚'},
+ {name:'ç³å¦®ç‰¹',file:'Linette',series:'åŸç¥',quote:'æŒ‡ä»¤å·²æ”¶åˆ°ã€‚æ¥ä¸‹æ¥è¿›å…¥è‡ªåŠ¨æ‰§è¡Œã€‚'},
+ {name:'å¨œç»´å¨…',file:'Navia',series:'åŸç¥',quote:'æ‰“èµ·ç²¾ç¥æ¥ï¼åˆºç«ä¼šçš„è¡ŒåŠ¨å¯ä¸èƒ½æ‹–æ‹–æ‹‰æ‹‰ã€‚'},
+ {name:'å…‹æ´›ç³å¾·',file:'Clorinde',series:'åŸç¥',quote:'ç›®æ ‡æ˜ç¡®ã€‚æ— éœ€å¤šè¨€ï¼Œå¼€å§‹æ‰§è¡Œã€‚'},
+ {name:'é—²äº‘',file:'Liuyun',series:'åŸç¥',quote:'æ­¤ç­‰æœºå…³ä¹‹æœ¯ï¼Œæ­£å®œä»£åŠ³ç¹çæ—¥è¯¾ã€‚'},
+ {name:'ç›è–‡å¡',file:'Mavuika',series:'åŸç¥',quote:'æ—¢ç„¶å†³å®šå‡ºå‘ï¼Œå°±å…¨åŠ›èµ¢ä¸‹ä»Šå¤©ï¼'},
+ {name:'é›·å§†',series:'Re:Zero',url:'https://s4.anilist.co/file/anilistcdn/character/large/b88575-Ayu8UPDA8NS6.png',quote:'é›·å§†ä¼šä¸€ç›´é™ªåœ¨ä½ çš„èº«è¾¹ã€‚'},
+ {name:'è‰¾ç±³è‰äºš',series:'Re:Zero',url:'https://s4.anilist.co/file/anilistcdn/character/large/b88572-IzTwXEHSobRs.jpg',quote:'ä»Šå¤©ä¹Ÿä¸€èµ·åŠªåŠ›å§ã€‚'},
+ {name:'äºšä¸å¨œ',series:'åˆ€å‰‘ç¥åŸŸ',url:'https://s4.anilist.co/file/anilistcdn/character/large/b36828-j5ib0adAzGMx.png',quote:'åªè¦è¡ŒåŠ¨èµ·æ¥ï¼Œå°±ä¸€å®šèƒ½æŠµè¾¾ç»ˆç‚¹ã€‚'},
+ {name:'èŠ™è‰è²',series:'è‘¬é€çš„èŠ™è‰è²',url:'https://s4.anilist.co/file/anilistcdn/character/large/b176754-PCnpqIOkjhFk.png',quote:'ååˆ†é’Ÿè€Œå·²ï¼Œå¯¹ç²¾çµæ¥è¯´å¾ˆçŸ­ã€‚'},
+ {name:'è²ä¼¦',series:'è‘¬é€çš„èŠ™è‰è²',url:'https://s4.anilist.co/file/anilistcdn/character/large/b183965-uGFohBjlFoTp.png',quote:'è¯·ä¸è¦ç†¬å¤œï¼Œä»»åŠ¡äº¤ç»™è‡ªåŠ¨åŒ–å°±å¥½ã€‚'},
+ {name:'å–œå¤šå·æµ·æ¢¦',series:'æ›´è¡£äººå¶å å…¥çˆ±æ²³',url:'https://s4.anilist.co/file/anilistcdn/character/large/b133676-kV2czE3C8Qls.png',quote:'å–œæ¬¢çš„ä¸œè¥¿å°±è¦å…¨åŠ›ä»¥èµ´ï¼'},
+ {name:'åè—¤ä¸€é‡Œ',series:'å­¤ç‹¬æ‘‡æ»š',url:'https://s4.anilist.co/file/anilistcdn/character/large/b257562-Ru35NYPfsqhY.png',quote:'è‡ªã€è‡ªåŠ¨è¿è¡Œçš„è¯ï¼Œæˆ‘åº”è¯¥å¯ä»¥â€¦â€¦'},
+ {name:'é”¦æœ¨åƒæŸ',series:'è‰å¯ä¸½ä¸',url:'https://s4.anilist.co/file/anilistcdn/character/large/b260329-ejhEdFfXhs53.jpg',quote:'ä»Šå¤©ä¹Ÿè¦å¼€å¿ƒåœ°å®Œæˆä»»åŠ¡ï¼'},
+ {name:'ç‰§æ¿‘çº¢è‰æ –',series:'å‘½è¿çŸ³ä¹‹é—¨',url:'https://s4.anilist.co/file/anilistcdn/character/large/b34470-Jw2LXZBL5R8i.png',quote:'è¿™æ‰ä¸æ˜¯ä»€ä¹ˆé­”æ³•ï¼Œæ˜¯è‡ªåŠ¨åŒ–ã€‚'},
+ {name:'æ¨±å²›éº»è¡£',series:'é’æ˜¥çŒªå¤´å°‘å¹´',url:'https://s4.anilist.co/file/anilistcdn/character/large/b127222-Jh5hhP7vZ7s1.png',quote:'åˆ«å‘å‘†äº†ï¼Œä»Šå¤©çš„ä»»åŠ¡è¿˜æ²¡ç»“æŸã€‚'},
+ {name:'è–‡å°”è‰ç‰¹',series:'ç´«ç½—å…°æ°¸æ’èŠ±å›­',url:'https://s4.anilist.co/file/anilistcdn/character/large/b90169-4wr1Zehnsac8.png',quote:'å·²ç†è§£æŒ‡ä»¤ï¼Œå¼€å§‹æ‰§è¡Œæ¯æ—¥ä»»åŠ¡ã€‚'},
+ {name:'æƒ æƒ ',series:'ä¸ºç¾å¥½çš„ä¸–ç•ŒçŒ®ä¸Šç¥ç¦',url:'https://s4.anilist.co/file/anilistcdn/character/large/b89361-tq8PQQ4MmF0M.png',quote:'å°†æ¯æ—¥ä»»åŠ¡ä¸€å£æ°”å…¨éƒ¨çˆ†è£‚å§ï¼'},
+ {name:'èµ«è',series:'ç‹¼ä¸é¦™è¾›æ–™',url:'https://s4.anilist.co/file/anilistcdn/character/large/b7373-1BH0gELuZmHD.jpg',quote:'äº¤ç»™è´¤ç‹¼ï¼Œå½“ç„¶ä¸ä¼šæœ‰é—®é¢˜ã€‚'},
+ {name:'è´è¶å¿',series:'é¬¼ç­ä¹‹åˆƒ',url:'https://s4.anilist.co/file/anilistcdn/character/large/b136070-MC9LLxJsHyHE.png',quote:'è¯·å®‰å¿ƒç­‰å¾…ä»»åŠ¡å®Œæˆã€‚'},
+ {name:'ç¶é—¨ç¥¢è±†å­',series:'é¬¼ç­ä¹‹åˆƒ',url:'https://s4.anilist.co/file/anilistcdn/character/large/b127518-NRlq1CQ1v1ro.png',quote:'å””ï¼ä»Šå¤©ä¹Ÿä¼šé¡ºåˆ©å®Œæˆã€‚'},
+ {name:'æ˜Ÿé‡çˆ±',series:'æˆ‘æ¨çš„å­©å­',url:'https://s4.anilist.co/file/anilistcdn/character/large/b172759-cccVhJ2fQA92.png',quote:'ä»Šå¤©ä¹Ÿè¦é—ªé—ªå‘å…‰åœ°å…¨å‹¤ï¼'},
+ {name:'æœ‰é©¬åŠ å¥ˆ',series:'æˆ‘æ¨çš„å­©å­',url:'https://s4.anilist.co/file/anilistcdn/character/large/b188783-77orwP7vNuNg.png',quote:'åˆ«å°çœ‹æˆ‘ï¼Œæ—¥å¸¸ä»»åŠ¡å½“ç„¶èƒ½å®Œæˆã€‚'}
+];
+let characterPool=[...baseCharacterPool];
+const statusNames={success:'æ­£å¸¸ç»“æŸ',failed:'å¼‚å¸¸ç»“æŸ',needs_update:'éœ€è¦æ›´æ–°',skipped:'å·²è·³è¿‡',interrupted:'å·²ä¸­æ–­',cancelled:'å·²å–æ¶ˆ',running:'ä½œæˆ˜ä¸­',queued:'æ’é˜Ÿä¸­',pending:'æœªå®Œæˆ',idle:'å°±ç»ª'};
+let workflows=[],order=[],currentStates={},uiPreferences=null,clearAnchor='',latestLines=[],lastLogText='',toastTimer,currentCharacter=null,lastCharacter=-1,draggingId=null,isDragging=false,currentBusy=false,preferencesSave=Promise.resolve(),ignoredBatchStatuses=new Set(),cancellableTasks=new Set(),cancellingTasks=new Set();
+const $=id=>document.getElementById(id);
+async function api(url,opt){let r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.message||d.error||'è¯·æ±‚å¤±è´¥');return d}
+function preferencePayload(){let workflowPrefs={};workflows.forEach(w=>workflowPrefs[w.id]={enabled:uiPreferences?.workflows?.[w.id]?.enabled!==false});return{version:1,order:[...order],max_parallel:Number($('parallel').value||1),workflows:workflowPrefs}}
+function queuePreferenceSave(showError=true){if(!uiPreferences)return Promise.resolve();let payload=preferencePayload();uiPreferences=payload;preferencesSave=preferencesSave.catch(()=>{}).then(()=>api('/api/preferences',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).then(d=>{uiPreferences=d.preferences;return d}).catch(e=>{if(showError)notify('ä¿å­˜ä»»åŠ¡å¼€å…³å¤±è´¥ï¼š'+e.message,true);throw e});return preferencesSave}
+function label(id){let w=workflows.find(x=>x.id===id);return w?w.name:id}
+function prettyStatus(value){return statusNames[value]||value||'å°±ç»ª'}
+function readinessText(value){return({success:'ä»Šæ—¥å·²å®Œæˆ',running:'æ­£åœ¨æ‰§è¡Œ',queued:'ç­‰å¾…æ‰§è¡Œ',failed:'ä»Šæ—¥æ‰§è¡Œå¼‚å¸¸',needs_update:'è„šæœ¬éœ€è¦æ›´æ–°',skipped:'ä»Šæ—¥å·²è·³è¿‡',cancelled:'ä»Šæ—¥å·²å–æ¶ˆ',interrupted:'ä»Šæ—¥å·²ä¸­æ–­',pending:'ä»Šæ—¥æœªå®Œæˆ'})[value]||'ä»Šæ—¥æœªå®Œæˆ'}
+function readinessTime(value){if(!value)return'';let date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})}
+function escapeAttr(value){return String(value||'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
+function notify(text,bad=false){let el=$('toast');el.textContent=text;el.className='toast show'+(bad?' bad':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='toast',4200)}
+function drawCharacter(){let index;if(characterPool.length>1){do{index=Math.floor(Math.random()*characterPool.length)}while(index===lastCharacter)}else index=0;lastCharacter=index;currentCharacter=characterPool[index];let img=$('operatorAvatar');img.classList.toggle('anime-avatar',!!currentCharacter.url);img.classList.remove('summon-flash');void img.offsetWidth;img.classList.add('summon-flash');img.onerror=()=>{img.onerror=null;img.classList.remove('anime-avatar');img.src='https://enka.network/ui/UI_AvatarIcon_Ayaka.png'};img.src=currentCharacter.url||('https://enka.network/ui/UI_AvatarIcon_'+currentCharacter.file+'.png');img.alt=currentCharacter.name+'å¥³æ€§è§’è‰²å¤´åƒ';$('operatorName').textContent=currentCharacter.name;$('operatorSeries').textContent=currentCharacter.series;$('operatorPoolSize').textContent='POOL '+characterPool.length;$('gachaStars').textContent='â˜…â˜…â˜…â˜…â˜…';$('operatorSpeech').textContent=currentCharacter.quote}
+function workflowEnabled(id){return uiPreferences?.workflows?.[id]?.enabled!==false}
+function setWorkflowEnabled(id,enabled){if(!uiPreferences?.workflows?.[id])return;uiPreferences.workflows[id].enabled=!!enabled;renderTasks(currentStates);queuePreferenceSave();notify(label(id)+(enabled?' å·²åŠ å…¥æ¯æ—¥æµç¨‹':' å·²è®¾ä¸º SKIPPED'))}
+function toggleWorkflow(id){setWorkflowEnabled(id,!workflowEnabled(id))}
+function clearDropMarks(){document.querySelectorAll('.task').forEach(x=>x.classList.remove('drop-before','drop-after'))}
+function reorderTask(source,targetId,before){if(!source||source===targetId)return false;let next=order.filter(x=>x!==source),target=next.indexOf(targetId);if(target<0)return false;next.splice(target+(before?0:1),0,source);order=next;draggingId=null;isDragging=false;clearDropMarks();renderTasks(currentStates);queuePreferenceSave();notify('ç¼–é˜Ÿé¡ºåºå·²æ›´æ–°');return true}
+function bindTaskDrag(row,id){let active=false,targetId=null,before=true;function movePointer(event){if(!active)return;let target=document.elementFromPoint(event.clientX,event.clientY)?.closest('.task');clearDropMarks();targetId=null;if(!target||target.dataset.id===id)return;let rect=target.getBoundingClientRect();before=event.clientY<rect.top+rect.height/2;targetId=target.dataset.id;target.classList.add(before?'drop-before':'drop-after')}function finish(commit){if(!active)return;document.removeEventListener('mousemove',movePointer);document.removeEventListener('mouseup',dropPointer);if(commit&&targetId)reorderTask(id,targetId,before);active=false;draggingId=null;isDragging=false;targetId=null;clearDropMarks();row.classList.remove('dragging')}function dropPointer(){finish(true)}row.addEventListener('mousedown',event=>{if(event.button!==0||event.target.closest('button,input,select,a'))return;active=true;draggingId=id;isDragging=true;row.classList.add('dragging');document.addEventListener('mousemove',movePointer);document.addEventListener('mouseup',dropPointer,{once:true});event.preventDefault()})}
+function renderTasks(states){
+ $('tasks').innerHTML='';
+ order.forEach((id,i)=>{
+  let w=workflows.find(x=>x.id===id);if(!w)return;
+  let state=states[id]||{},enabled=workflowEnabled(id),cancellable=cancellableTasks.has(id),cancelling=cancellingTasks.has(id),meta=gameMeta[id]||{icon:'â—‡',color:'#8d7cff'};
+  let raw=state.running?'running':(state.batch_status||state.last_status||'idle');
+  let todayRaw=state.today_status||'pending';
+  if(!enabled&&todayRaw!=='success'&&todayRaw!=='running')todayRaw='skipped';
+  let readyAt=readinessTime(state.today_finished_at||state.today_started_at),readyDetail=readyAt?('æ›´æ–°äº '+readyAt):(todayRaw==='pending'?'ç­‰å¾…ä»Šæ—¥é¦–æ¬¡æ‰§è¡Œ':'çŠ¶æ€å®æ—¶åŒæ­¥');
+  let statusTag=raw==='skipped'?`<button class="pill skipped status-retry" title="è¯¥ä»»åŠ¡æœ¬è½®è¢«è·³è¿‡ï¼›ç‚¹å‡»å¼ºåˆ¶æ‰§è¡Œ" ${currentBusy?'disabled':''} onclick="runOne('${id}',true)">${prettyStatus(raw)} Â· é‡è·‘</button>`:`<span class="pill ${raw}">${prettyStatus(raw)}</span>`;
+  if(state.tomorrow_update)statusTag+=`<span class="pill needs_update" title="ä¸‹ä¸ªæ¸¸æˆæ—¥å¯åŠ¨è„šæœ¬åå°†å…ˆç­‰å¾… 10 åˆ†é’Ÿè‡ªåŠ¨æ›´æ–°">æ˜æ—¥æ›´æ–°</span>`;
+  let row=document.createElement('div');row.className='task'+(state.running?' is-running':'')+(enabled?'':' is-disabled');row.dataset.id=id;row.style.setProperty('--accent',meta.color);
+  row.innerHTML=`<span class="drag-handle" title="æŒ‰ä½æ‹–æ‹½è°ƒæ•´é¡ºåº">â‹®â‹®</span><input class="select-box" type="checkbox" data-id="${id}" ${enabled?'checked':''} onchange="setWorkflowEnabled('${id}',this.checked)" aria-label="${enabled?'åœç”¨':'å¯ç”¨'}${w.name}"><div class="task-icon">${meta.icon}</div><div><span class="task-name">${w.name}</span>${statusTag}<button class="participation ${enabled?'enabled':'skipped'}" onclick="toggleWorkflow('${id}')" title="ç‚¹å‡»åˆ‡æ¢è¯¥ä»»åŠ¡æ˜¯å¦å‚åŠ æ¯æ—¥æµç¨‹">${enabled?'æ¯æ—¥å¯åŠ¨':'SKIPPED'}</button><span class="task-sub">${state.step?'å½“å‰æ­¥éª¤ï¼š'+state.step:(state.batch_message||state.message||'ç­‰å¾…æŒ‡æŒ¥å®˜ä¸‹ä»¤')}</span><span class="readiness-bar ${todayRaw}" title="${escapeAttr(state.today_message||readinessText(todayRaw))}"><span class="readiness-label">${readinessText(todayRaw)}</span><span class="readiness-detail">${readyDetail}</span></span></div><div class="task-actions"><button class="secondary" title="å‘å‰è°ƒæ•´" ${i===0?'disabled':''} onclick="move('${id}',-1)">â†‘</button><button class="secondary" title="å‘åè°ƒæ•´" ${i===order.length-1?'disabled':''} onclick="move('${id}',1)">â†“</button></div><div class="single"><button class="secondary" ${currentBusy?'disabled':''} onclick="runOne('${id}')">å•é˜Ÿå‡ºå‡»</button><button class="cancel-one" title="åªå–æ¶ˆè¿™ä¸ªä»»åŠ¡ï¼Œä¸å½±å“å…¶ä»–ä»»åŠ¡" ${cancellable&&!cancelling?'':'disabled'} onclick="cancelOne('${id}')">${cancelling?'å–æ¶ˆä¸­':'å–æ¶ˆ'}</button></div>`;
+  bindTaskDrag(row,id);$('tasks').appendChild(row)
+ })
+}
+function move(id,delta){let i=order.indexOf(id),j=i+delta;if(j<0||j>=order.length)return;[order[i],order[j]]=[order[j],order[i]];renderTasks(currentStates);queuePreferenceSave()}
+function renderHistory(runs){$('history').innerHTML=runs.length?runs.slice(0,12).map(x=>`<div class="run"><div class="run-main"><b>#${x.id} Â· ${label(x.workflow)}</b><span class="small muted">${x.started_at||'æ—¶é—´æœªçŸ¥'}</span></div><span class="run-state ${x.status}">${prettyStatus(x.status)}</span></div>`).join(''):'<div class="empty">æš‚æ— è¡ŒåŠ¨è®°å½•</div>'}
+async function refresh(){
+ try{
+  let d=await api('/api/status');workflows=d.workflows.filter(x=>x.id!=='self_test');
+  if(!uiPreferences){let savedState=await api('/api/preferences');uiPreferences=savedState.preferences;order=[...uiPreferences.order];$('parallel').value=String(uiPreferences.max_parallel||1)}
+  let busy=d.state.running,batch=d.state.batch,done=batch.completed||[];currentBusy=busy;currentStates=d.state.workflows;
+  cancellableTasks=new Set([...(batch.queue||[]),...(batch.active||[]),...Object.entries(currentStates).filter(([,state])=>state.running).map(([id])=>id)]);
+  [...cancellingTasks].forEach(id=>{if(!cancellableTasks.has(id))cancellingTasks.delete(id)});
+  if(batch.running)[...(batch.queue||[]),...(batch.active||[])].forEach(id=>ignoredBatchStatuses.delete(id));
+  done.forEach(item=>{if(currentStates[item.workflow]&&!ignoredBatchStatuses.has(item.workflow))currentStates[item.workflow]={...currentStates[item.workflow],batch_status:item.status,batch_message:item.message}});
+  if(!isDragging)renderTasks(currentStates);
+  $('headline').textContent=busy?'ä½œæˆ˜ä»»åŠ¡æ‰§è¡Œä¸­':'ç³»ç»Ÿå¾…å‘½ä¸­';$('message').textContent=batch.message||d.state.message;$('statusLight').classList.toggle('busy',busy);
+  if(currentCharacter)$('operatorSpeech').textContent=busy?'ã€Œ'+currentCharacter.name+'ã€æ­£åœ¨å…³æ³¨æœ¬æ¬¡è¡ŒåŠ¨ï¼':currentCharacter.quote;
+  $('active').textContent=(batch.active||d.state.active).map(label).join('ã€')||'å½“å‰æ— é˜Ÿä¼å‡ºå‡»';$('queued').textContent=batch.queue.map(label).join('ã€')||'é˜Ÿåˆ—ä¸ºç©º';$('completed').textContent=done.map(x=>label(x.workflow)+' Â· '+prettyStatus(x.status)).join('\n')||'ç­‰å¾…è¡ŒåŠ¨æ•°æ®';
+  let enabledIds=workflows.filter(w=>workflowEnabled(w.id)).map(w=>w.id),total=enabledIds.length,finished=enabledIds.filter(id=>currentStates[id]?.today_completed||currentStates[id]?.today_status==='success').length;
+  $('progressText').textContent=`${finished} / ${total}`;$('progressFill').style.width=(total?Math.min(100,finished/total*100):0)+'%';$('startDaily').disabled=busy;renderHistory(d.runs||[])
+ }catch(e){$('headline').textContent='æŒ‡æŒ¥é“¾è·¯å¼‚å¸¸';$('message').textContent=e.message;$('statusLight').classList.add('busy')}
+}
+async function runDaily(){let selected=order.filter(workflowEnabled);if(!selected.length){notify('æ‰€æœ‰ä»»åŠ¡å‡ä¸º SKIPPEDï¼Œè¯·å…ˆç‚¹å‡»æ ‡ç­¾å¯ç”¨ä»»åŠ¡',true);return}try{ignoredBatchStatuses.clear();await queuePreferenceSave(false);let d=await api('/api/run-daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workflows:selected,max_parallel:Number($('parallel').value)})});notify('âœ¦ '+d.message);refresh()}catch(e){notify(e.message,true)}}
+async function runOne(id,force=false){try{let d=await api('/api/run?workflow='+encodeURIComponent(id)+(force?'&force=true':''),{method:'POST'});if(force)ignoredBatchStatuses.add(id);notify('âœ¦ '+d.message);refresh()}catch(e){notify(e.message,true)}}
+async function cancelOne(id){if(!cancellableTasks.has(id)||cancellingTasks.has(id))return;cancellingTasks.add(id);renderTasks(currentStates);try{let d=await api('/api/cancel?workflow='+encodeURIComponent(id),{method:'POST'});notify(d.message);refresh()}catch(e){cancellingTasks.delete(id);renderTasks(currentStates);notify(e.message,true)}}
+async function stopAll(){try{let d=await api('/api/stop',{method:'POST'});notify(d.message);refresh()}catch(e){notify(e.message,true)}}
+async function refreshLogs(){try{let d=await api('/api/logs?lines=300');latestLines=d.lines||[];let start=0;if(clearAnchor){let i=latestLines.lastIndexOf(clearAnchor);start=i>=0?i+1:0}let visible=latestLines.slice(start),text=visible.length?visible.join('\n'):'æš‚æ— æ–°æ—¥å¿—';let view=$('logView'),nearBottom=view.scrollHeight-view.scrollTop-view.clientHeight<45;if(text!==lastLogText){view.textContent=text;if($('autoScroll').checked&&nearBottom)view.scrollTop=view.scrollHeight;lastLogText=text}}catch(e){$('logView').textContent='æ—¥å¿—è¯»å–å¤±è´¥ï¼š'+e.message}}
+function clearLogView(){clearAnchor=latestLines.length?latestLines[latestLines.length-1]:'';lastLogText='';$('logView').textContent='ç»ˆç«¯æ˜¾ç¤ºå·²æ¸…ç©ºï¼Œç­‰å¾…æ–°ä¿¡å·â€¦â€¦'}
+function toggleTheme(){document.body.classList.toggle('day');localStorage.setItem('gameflow-day',document.body.classList.contains('day')?'1':'0')}
+function updateClock(){let now=new Date();$('clock').textContent='SYNC '+now.toLocaleTimeString('zh-CN',{hour12:false})}
+function saveBeforeExit(){if(!uiPreferences)return;let body=JSON.stringify(preferencePayload());navigator.sendBeacon('/api/preferences',new Blob([body],{type:'application/json'}))}
+if(localStorage.getItem('gameflow-day')==='1')document.body.classList.add('day');$('parallel').addEventListener('change',()=>queuePreferenceSave());window.addEventListener('pagehide',saveBeforeExit);drawCharacter();updateClock();refresh();refreshLogs();setInterval(updateClock,1000);setInterval(refresh,1500);setInterval(refreshLogs,1000);
+</script></body></html>'''
+
+
+def handler_for(manager: WorkflowManager):
+    preferences = UiPreferences(manager.root / "data" / "ui_preferences.json",
+                                list(manager.config["workflows"]))
+
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self, value, status=200):
+            body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/":
+                body = PAGE.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/status":
+                workflows = [{"id": key, "name": value.get("display_name", key)}
+                             for key, value in manager.config["workflows"].items()]
+                self._json({"state": manager.state(), "workflows": workflows,
+                            "runs": manager.store.recent(),
+                            "preferences": preferences.get()})
+                return
+            if parsed.path == "/api/preferences":
+                self._json({"preferences": preferences.get()})
+                return
+            if parsed.path == "/api/logs":
+                query = urllib.parse.parse_qs(parsed.query)
+                try:
+                    count = max(20, min(int(query.get("lines", ["300"])[0]), 1000))
+                except ValueError:
+                    count = 300
+                log_path = manager.root / "logs" / "gameflow.log"
+                lines = []
+                if log_path.exists():
+                    with log_path.open("rb") as handle:
+                        handle.seek(0, 2)
+                        size = handle.tell()
+                        handle.seek(max(0, size - 262144))
+                        text = handle.read().decode("utf-8", errors="replace")
+                    lines = text.splitlines()[-count:]
+                self._json({"lines": lines})
+                return
+            self._json({"error": "not found"}, 404)
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/preferences":
+                try:
+                    value = preferences.update(self._body())
+                    self._json({"ok": True, "preferences": value})
+                except (ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
+                    self._json({"ok": False, "message": f"ä¿å­˜ç•Œé¢çŠ¶æ€å¤±è´¥ï¼š{exc}"}, 400)
+                return
+            if parsed.path == "/api/run":
+                query = urllib.parse.parse_qs(parsed.query)
+                workflow = query.get("workflow", [""])[0]
+                force = query.get("force", ["false"])[0].lower() == "true"
+                ok, message = manager.start(workflow, "manual", force)
+                self._json({"ok": ok, "message": message}, 200 if ok else 409)
+                return
+            if parsed.path == "/api/run-daily":
+                try:
+                    body = self._body()
+                    ok, message = manager.start_daily(body.get("workflows", []),
+                                                      body.get("max_parallel", 1),
+                                                      bool(body.get("force", False)))
+                    self._json({"ok": ok, "message": message}, 200 if ok else 409)
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    self._json({"ok": False, "message": f"è¯·æ±‚æ ¼å¼é”™è¯¯ï¼š{exc}"}, 400)
+                return
+            if parsed.path == "/api/cancel":
+                query = urllib.parse.parse_qs(parsed.query)
+                workflow = query.get("workflow", [""])[0]
+                ok, message = manager.cancel(workflow)
+                self._json({"ok": ok, "message": message}, 200 if ok else 409)
+                return
+            if parsed.path == "/api/stop":
+                ok, message = manager.stop()
+                self._json({"ok": ok, "message": message}, 200 if ok else 409)
+                return
+            self._json({"error": "not found"}, 404)
+
+        def log_message(self, fmt, *args):
+            return
+    return Handler
+
+
+def serve(manager: WorkflowManager, host: str, port: int):
+    ThreadingHTTPServer((host, port), handler_for(manager)).serve_forever()
