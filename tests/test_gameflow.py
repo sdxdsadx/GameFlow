@@ -1,24 +1,434 @@
 import json
+import inspect
 import os
 import sys
 import tempfile
 import threading
 import time
+import http.client
+from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from gameflow.config import ConfigError, load_config
 from gameflow.engine import Engine, WorkflowManager
+from gameflow.daily import operational_day
+from gameflow.diagnostics import collect_failure_diagnostics
 from gameflow.mailer import send_daily_screenshots
 from gameflow.store import Store
-from gameflow.web import PAGE
-from gameflow.runners import (RUNNERS, Result, RunContext, _decode_process_output, _naruto_visual_metrics, run_alas_gui,
+from gameflow.web import PAGE, UiPreferences, handler_for
+from gameflow.runners import (RUNNERS, EmulatorBlackScreenWatchdog, Result, RunContext,
+                              _click_named_gui_button, _decode_process_output,
+                              _focus_window_before_click,
+                              _parse_baas_queue_count,
+                              _naruto_lobby_icon_metrics,
+                              _naruto_visual_metrics, _screen_is_black,
+                              run_alas_gui,
                               run_adb, run_baas_gui, run_ba_reward_verify, run_gumballs_gui,
-                              run_log_gui_daily, run_maa_gui, run_maaend_gui, run_mumu_wait)
+                              run_log_gui_daily, run_maa_gui, run_maaend_gui, run_mumu_wait,
+                              run_naruto_shadow)
 
 
 class GameFlowTests(unittest.TestCase):
+    def test_failure_diagnostics_writes_local_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = {"display_name": "æµ‹è¯•æµç¨‹", "steps": []}
+            step = {"id": "broken", "runner": "command"}
+            with patch("gameflow.diagnostics._process_and_window_state",
+                       return_value={"processes": [], "windows": [], "foreground": None}), \
+                    patch("gameflow.diagnostics._save_log_tails", return_value=[]), \
+                    patch("gameflow.diagnostics._workflow_devices", return_value=[]):
+                evidence = collect_failure_diagnostics(
+                    root, {"tools": {}}, "test", workflow, step, 2,
+                    "simulated failure", {"marker": "TEST"})
+            report = Path(evidence["report"])
+            self.assertTrue(report.exists())
+            payload = __import__("json").loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(payload["workflow"], "test")
+            self.assertEqual(payload["step"], "broken")
+            self.assertEqual(payload["attempt"], 2)
+            self.assertEqual(payload["result_details"]["marker"], "TEST")
+
+    def test_operational_day_changes_at_four_am(self):
+        china = timezone(timedelta(hours=8))
+        self.assertEqual(operational_day(
+            datetime(2026, 7, 20, 3, 59, 59, tzinfo=china)), "2026-07-19")
+        self.assertEqual(operational_day(
+            datetime(2026, 7, 20, 4, 0, 0, tzinfo=china)), "2026-07-20")
+
+    def test_completed_today_uses_four_am_boundary(self):
+        china = timezone(timedelta(hours=8))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            db = store._connect()
+            try:
+                db.execute(
+                    "INSERT INTO runs(workflow,status,trigger_name,started_at,finished_at) "
+                    "VALUES(?,?,?,?,?)",
+                    ("daily", "success", "manual", "2026-07-20T03:30:00+08:00",
+                     "2026-07-20T03:31:00+08:00"))
+                db.commit()
+            finally:
+                db.close()
+            self.assertTrue(store.completed_today(
+                "daily", datetime(2026, 7, 20, 3, 59, tzinfo=china)))
+            self.assertFalse(store.completed_today(
+                "daily", datetime(2026, 7, 20, 4, 0, tzinfo=china)))
+
+    def test_daily_run_statuses_keep_today_completed_after_failed_rerun(self):
+        china = timezone(timedelta(hours=8))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            db = store._connect()
+            try:
+                db.executemany(
+                    "INSERT INTO runs(workflow,status,trigger_name,started_at,finished_at,message) "
+                    "VALUES(?,?,?,?,?,?)",
+                    [
+                        ("daily", "success", "manual", "2026-07-20T06:00:00+08:00",
+                         "2026-07-20T06:30:00+08:00", "done"),
+                        ("daily", "failed", "manual", "2026-07-20T07:00:00+08:00",
+                         "2026-07-20T07:01:00+08:00", "rerun failed"),
+                        ("other", "failed", "manual", "2026-07-20T08:00:00+08:00",
+                         "2026-07-20T08:01:00+08:00", "failed"),
+                    ])
+                db.commit()
+            finally:
+                db.close()
+            statuses = store.daily_run_statuses(
+                ["daily", "other", "pending"],
+                datetime(2026, 7, 20, 9, 0, tzinfo=china))
+            self.assertEqual(statuses["daily"]["status"], "success")
+            self.assertTrue(statuses["daily"]["completed"])
+            self.assertEqual(statuses["other"]["status"], "failed")
+            self.assertFalse(statuses["pending"]["completed"])
+
+    def test_workflow_flags_persist_and_are_exposed_to_gui(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            marker = {"marked_day": "2026-07-23", "wait_seconds": 600}
+            store.set_workflow_flag("azur_lane_daily", "update_before_next_day", marker)
+            self.assertEqual(store.get_workflow_flag(
+                "azur_lane_daily", "update_before_next_day"), marker)
+            manager = WorkflowManager(root, {"workflows": {
+                "azur_lane_daily": {"steps": []},
+            }}, store)
+            state = manager.state()["workflows"]["azur_lane_daily"]
+            self.assertTrue(state["tomorrow_update"])
+            store.delete_workflow_flag("azur_lane_daily", "update_before_next_day")
+            self.assertIsNone(store.get_workflow_flag(
+                "azur_lane_daily", "update_before_next_day"))
+
+    def test_finished_batch_badges_clear_after_operational_day_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = WorkflowManager(root, {"workflows": {
+                "daily": {"steps": []},
+            }}, Store(root / "db.sqlite"))
+            manager._batch.update(running=False, completed=[{
+                "workflow": "daily", "status": "skipped", "message": "done",
+            }], operational_day="2000-01-01")
+            snapshot = manager.state()["batch"]
+            self.assertEqual(snapshot["completed"], [])
+            self.assertEqual(snapshot["operational_day"], operational_day())
+
+    def test_manager_exposes_live_daily_readiness_per_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); store = Store(root / "db.sqlite")
+            run_id = store.start_run("done", "manual")
+            store.finish_run(run_id, "success", "done")
+            manager = WorkflowManager(root, {"workflows": {
+                "done": {"steps": []}, "queued": {"steps": []},
+            }}, store)
+            manager._batch.update(running=True, queue=["queued"], active=[], completed=[])
+            states = manager.state()["workflows"]
+            self.assertEqual(states["done"]["today_status"], "success")
+            self.assertTrue(states["done"]["today_completed"])
+            self.assertEqual(states["queued"]["today_status"], "queued")
+
+    def test_ui_preferences_persist_task_switches_order_and_parallelism(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "data" / "ui_preferences.json"
+            preferences = UiPreferences(path, ["daily_game", "naruto_daily", "self_test"])
+            saved = preferences.update({
+                "order": ["naruto_daily", "unknown", "daily_game"],
+                "max_parallel": 9,
+                "workflows": {
+                    "daily_game": {"enabled": False},
+                    "naruto_daily": {"enabled": True},
+                    "unknown": {"enabled": False},
+                },
+            })
+            self.assertEqual(saved["order"], ["naruto_daily", "daily_game"])
+            self.assertEqual(saved["max_parallel"], 2)
+            self.assertFalse(saved["workflows"]["daily_game"]["enabled"])
+            self.assertNotIn("self_test", saved["workflows"])
+
+            reloaded = UiPreferences(path, ["daily_game", "naruto_daily", "self_test"]).get()
+            self.assertEqual(reloaded, saved)
+
+    def test_web_ui_exposes_clickable_skipped_and_persistent_task_switches(self):
+        self.assertIn("SKIPPED", PAGE)
+        self.assertIn("toggleWorkflow", PAGE)
+        self.assertIn("/api/preferences", PAGE)
+        self.assertIn("saveBeforeExit", PAGE)
+
+    def test_web_ui_exposes_per_task_cancel_button(self):
+        self.assertIn("async function cancelOne(id)", PAGE)
+        self.assertIn("/api/cancel?workflow=", PAGE)
+        self.assertIn("åªå–æ¶ˆè¿™ä¸ªä»»åŠ¡ï¼Œä¸å½±å“å…¶ä»–ä»»åŠ¡", PAGE)
+        self.assertIn("cancellableTasks", PAGE)
+
+    def test_web_ui_exposes_live_daily_readiness_bar(self):
+        for required in ("readiness-bar", "today_status", "ä»Šæ—¥å·²å®Œæˆ",
+                         "ä»Šæ—¥æœªå®Œæˆ", "ç­‰å¾…æ‰§è¡Œ"):
+            self.assertIn(required, PAGE)
+        self.assertIn("æ˜æ—¥æ›´æ–°", PAGE)
+
+    def test_resource_update_marker_detection_is_scoped_to_star_rail(self):
+        root = Path(__file__).resolve().parents[1]
+        config = load_config(root / "config" / "workflow.json")
+        configured = [
+            (workflow_id, step["id"])
+            for workflow_id, workflow in config["workflows"].items()
+            for step in workflow["steps"]
+            if step.get("update_markers")
+        ]
+        self.assertEqual(configured, [("star_rail_daily", "run_star_rail_daily")])
+        markers = config["workflows"]["star_rail_daily"]["steps"][0]["update_markers"]
+        self.assertIn("GitHub å‘ç°æ–°ç‰ˆæœ¬", markers)
+
+    def test_black_screen_classifier_and_five_minute_watchdog(self):
+        import cv2
+        import numpy as np
+
+        black_png = cv2.imencode(".png", np.full((120, 200, 3), 28, dtype=np.uint8))[1].tobytes()
+        normal_png = cv2.imencode(".png", np.full((120, 200, 3), 90, dtype=np.uint8))[1].tobytes()
+        self.assertTrue(_screen_is_black(black_png, {})[0])
+        self.assertFalse(_screen_is_black(normal_png, {})[0])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = RunContext(Path(tmp), {}, lambda _: None, threading.Event())
+            step = {"id": "watchdog_test", "black_screen_watchdog": True,
+                    "black_screen_check_interval": 30, "black_screen_timeout": 300,
+                    "black_screen_screenshot_path": str(Path(tmp) / "latest.png")}
+            watchdog = EmulatorBlackScreenWatchdog(step, ctx, "æµ‹è¯•æ¨¡æ‹Ÿå™¨")
+            captured = SimpleNamespace(returncode=0, stdout=black_png, stderr=b"")
+            with patch("gameflow.runners.subprocess.run", return_value=captured), \
+                    patch("gameflow.runners.time.monotonic", side_effect=[0.0, 301.0]):
+                self.assertIsNone(watchdog.poll(force=True))
+                detected = watchdog.poll(force=True)
+        self.assertIsNotNone(detected)
+        self.assertTrue(detected.details["black_screen_restart"])
+        self.assertGreaterEqual(detected.details["black_seconds"], 300)
+
+    def test_black_screen_restarts_emulator_then_retries_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            calls = []
+
+            def runner(step, ctx):
+                calls.append("run")
+                if len(calls) == 1:
+                    return Result(False, "è¿ç»­é»‘å±", {"black_screen_restart": True})
+                return Result(True, "æ¢å¤åå®Œæˆ")
+
+            config = {"workflows": {"test": {"steps": [{
+                "id": "watched", "runner": "watched",
+                "max_black_screen_restarts": 1, "retry_delay": 0}]}}}
+            with patch.dict(RUNNERS, {"watched": runner}), patch(
+                    "gameflow.engine._restart_configured_emulator",
+                    return_value=Result(True, "æ¨¡æ‹Ÿå™¨å·²æ¢å¤")) as restart:
+                engine = Engine(root, config, store)
+                engine.start("test")
+                engine._thread.join(5)
+            self.assertEqual(calls, ["run", "run"])
+            restart.assert_called_once()
+            self.assertEqual(engine.state()["last_status"], "success")
+
+    def test_global_failure_policy_runs_exactly_two_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            calls = []
+
+            def always_fails(step, ctx):
+                calls.append("run")
+                return Result(False, "still broken")
+
+            config = {
+                "failure_retry": {
+                    "enabled": True,
+                    "max_attempts": 2,
+                    "retry_delay": 0,
+                },
+                "workflows": {"test": {"steps": [{
+                    "id": "flaky",
+                    "runner": "always_fails",
+                    "retry": 99,
+                    "max_black_screen_restarts": 99,
+                }]}},
+            }
+            with patch.dict(RUNNERS, {"always_fails": always_fails}):
+                engine = Engine(root, config, store)
+                engine.start("test")
+                engine.join(3)
+            self.assertEqual(calls, ["run", "run"])
+            self.assertEqual(engine.state()["last_status"], "failed")
+
+    def test_skipped_step_is_not_retried_and_sets_next_day_update_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            calls = []
+
+            def maintenance(step, ctx):
+                calls.append("run")
+                return Result(False, "æœåŠ¡å™¨ç»´æŠ¤", {
+                    "defer_update_next_day": True,
+                    "next_day_update_wait": 600,
+                }, status="skipped")
+
+            config = {"workflows": {"azur_lane_daily": {"steps": [{
+                "id": "alas", "runner": "maintenance", "retry": 3,
+            }]}}}
+            with patch.dict(RUNNERS, {"maintenance": maintenance}):
+                engine = Engine(root, config, store)
+                engine.start("azur_lane_daily")
+                engine._thread.join(5)
+            self.assertEqual(calls, ["run"])
+            self.assertEqual(engine.state()["last_status"], "skipped")
+            marker = store.get_workflow_flag(
+                "azur_lane_daily", "update_before_next_day")
+            self.assertEqual(marker["wait_seconds"], 600)
+
+    def test_script_gui_is_confirmed_foreground_before_click(self):
+        hwnd = 2468
+        win32gui = Mock()
+        win32gui.IsWindow.return_value = True
+        win32gui.GetForegroundWindow.return_value = hwnd
+        win32con = SimpleNamespace(
+            SW_RESTORE=9,
+            SWP_NOMOVE=2,
+            SWP_NOSIZE=1,
+            SWP_SHOWWINDOW=64,
+            HWND_TOPMOST=-1,
+            HWND_NOTOPMOST=-2,
+        )
+        with patch("gameflow.runners.os.name", "nt"), patch.dict(
+                sys.modules, {"win32gui": win32gui, "win32con": win32con}):
+            focused, message = _focus_window_before_click(
+                hwnd, "æµ‹è¯•è„šæœ¬", timeout=0.1, settle_seconds=0)
+
+        self.assertTrue(focused)
+        self.assertIn("ç½®äºæœ€å‰ç«¯", message)
+        win32gui.ShowWindow.assert_called_once_with(hwnd, win32con.SW_RESTORE)
+        win32gui.BringWindowToTop.assert_called_once_with(hwnd)
+        win32gui.SetForegroundWindow.assert_called_once_with(hwnd)
+        self.assertEqual(win32gui.SetWindowPos.call_args_list[-1].args[1],
+                         win32con.HWND_NOTOPMOST)
+
+    def test_script_gui_uses_attached_input_fallback_when_windows_denies_focus(self):
+        hwnd = 9753
+        win32gui = Mock()
+        win32gui.IsWindow.return_value = True
+        win32gui.SetForegroundWindow.side_effect = OSError("foreground denied")
+        win32gui.GetForegroundWindow.return_value = 111
+        win32con = SimpleNamespace(
+            SW_RESTORE=9, SWP_NOMOVE=2, SWP_NOSIZE=1, SWP_SHOWWINDOW=64,
+            HWND_TOPMOST=-1, HWND_NOTOPMOST=-2)
+        with patch("gameflow.runners.os.name", "nt"), patch.dict(
+                sys.modules, {"win32gui": win32gui, "win32con": win32con}), patch(
+                    "gameflow.runners._force_foreground_window", return_value=True) as fallback:
+            focused, _ = _focus_window_before_click(
+                hwnd, "æµ‹è¯•è„šæœ¬", timeout=0.1, settle_seconds=0)
+
+        self.assertTrue(focused)
+        fallback.assert_called_once_with(hwnd)
+
+    def test_named_gui_button_rechecks_foreground_immediately_before_click(self):
+        class PsutilError(Exception):
+            pass
+
+        hwnd = 8642
+        pid = 4321
+        win32gui = Mock()
+        win32gui.IsWindowVisible.return_value = True
+        win32gui.GetWindowText.return_value = "March7th Launcher"
+        win32gui.GetWindowRect.return_value = (100, 100, 1100, 800)
+        win32gui.EnumWindows.side_effect = lambda callback, value: callback(hwnd, value)
+        win32process = SimpleNamespace(
+            GetWindowThreadProcessId=lambda _: (77, pid))
+        psutil = SimpleNamespace(
+            Error=PsutilError,
+            Process=lambda _: SimpleNamespace(children=lambda recursive: []),
+            process_iter=lambda _: [SimpleNamespace(
+                info={"pid": pid, "name": "March7th Launcher.exe"})])
+        app = Mock()
+        app.connect.return_value = app
+        window = Mock()
+        window.descendants.return_value = []
+        app.window.return_value = window
+        pywinauto = SimpleNamespace(Application=Mock(return_value=app))
+        pyautogui = Mock()
+
+        with patch("gameflow.runners.os.name", "nt"), patch.dict(sys.modules, {
+                "psutil": psutil, "win32con": SimpleNamespace(),
+                "win32gui": win32gui, "win32process": win32process,
+                "pywinauto": pywinauto, "pyautogui": pyautogui}), patch(
+                    "gameflow.runners._focus_window_before_click",
+                    return_value=(True, "focused")) as focus:
+            clicked, _ = _click_named_gui_button(
+                pid, ["March7th Launcher.exe"], ["March7th"], ["å®Œæ•´è¿è¡Œ"],
+                0.165, 0.82)
+
+        self.assertTrue(clicked)
+        self.assertEqual(focus.call_count, 2)
+        pyautogui.click.assert_called_once_with(265, 674)
+
+    def test_named_gui_button_accepts_detached_window_with_strong_title(self):
+        class PsutilError(Exception):
+            pass
+
+        hwnd = 9753
+        detached_pid = 2468
+        win32gui = Mock()
+        win32gui.IsWindowVisible.return_value = True
+        win32gui.GetWindowText.return_value = "ç»åŒºé›¶ ä¸€æ¡é¾™ 01"
+        win32gui.GetWindowRect.return_value = (0, 0, 1200, 800)
+        win32gui.EnumWindows.side_effect = lambda callback, value: callback(hwnd, value)
+        win32process = SimpleNamespace(
+            GetWindowThreadProcessId=lambda _: (77, detached_pid))
+        psutil = SimpleNamespace(
+            Error=PsutilError,
+            Process=lambda _: SimpleNamespace(children=lambda recursive: []),
+            process_iter=lambda _: [])
+        app = Mock(); app.connect.return_value = app
+        window = Mock(); window.descendants.return_value = []
+        app.window.return_value = window
+        pywinauto = SimpleNamespace(Application=Mock(return_value=app))
+        pyautogui = Mock()
+
+        with patch("gameflow.runners.os.name", "nt"), patch.dict(sys.modules, {
+                "psutil": psutil, "win32con": SimpleNamespace(),
+                "win32gui": win32gui, "win32process": win32process,
+                "pywinauto": pywinauto, "pyautogui": pyautogui}), patch(
+                    "gameflow.runners._focus_window_before_click",
+                    return_value=(True, "focused")):
+            clicked, message = _click_named_gui_button(
+                1111, ["OneDragon-Launcher.exe"], ["ç»åŒºé›¶ ä¸€æ¡é¾™"],
+                ["å¯åŠ¨ä¸€æ¡é¾™"], 0.88, 0.92)
+
+        self.assertTrue(clicked)
+        self.assertIn("ç»åŒºé›¶ ä¸€æ¡é¾™ 01", message)
+        pyautogui.click.assert_called_once_with(1056, 736)
+
     def test_web_dashboard_keeps_controls_and_anime_theme(self):
         for required in ("id=\"tasks\"", "id=\"parallel\"", "id=\"startDaily\"",
                          "id=\"logView\"", "GameFlow æ¬¡å…ƒä½œæˆ˜ç»ˆç«¯", "class=\"gacha-card\"",
@@ -80,9 +490,87 @@ class GameFlowTests(unittest.TestCase):
                          ["start_azur_lane_emulator", "run_azur_lane_script"])
         self.assertEqual(azur_steps[0]["runner"], "mumu_wait")
         self.assertFalse(config["workflows"]["azur_lane_daily"].get("exclusive_with"))
+        self.assertTrue(config["workflows"]["blue_archive_daily"]["steps"][2]["require_admin"])
+        blue_start = config["workflows"]["blue_archive_daily"]["steps"][0]
+        self.assertTrue(blue_start["verify_started"])
+        self.assertGreaterEqual(blue_start["verify_timeout"], 60)
+        blue_runner = config["workflows"]["blue_archive_daily"]["steps"][2]
+        self.assertEqual(
+            [blue_runner["repeated_probe_tap_x"], blue_runner["repeated_probe_tap_y"]],
+            [930, 540])
         naruto = config["workflows"]["naruto_daily"]["steps"][2]
         self.assertTrue(naruto["shadow_open_confirm"])
-        self.assertEqual(naruto["shadow_open_confirm_point"], [360, 936])
+        self.assertEqual(naruto["shadow_continue_point"], [520, 1118])
+        self.assertGreaterEqual(naruto["shadow_continue_wait"], 5)
+        self.assertGreaterEqual(naruto["enable_retry_interval"], 8)
+        self.assertGreaterEqual(naruto["enable_confirm_timeout"], 10)
+        self.assertGreaterEqual(naruto["enable_confirm_stable_checks"], 2)
+        self.assertIn("åŠŸèƒ½è¿è¡Œä¸­", naruto["enable_success_labels"])
+        self.assertGreaterEqual(naruto["start_retry_interval"], 12)
+        self.assertGreaterEqual(naruto["float_stop_confirm_timeout"], 10)
+        self.assertGreaterEqual(naruto["float_stop_stable_checks"], 2)
+        self.assertEqual(naruto["orientation_points"]["landscape"]["game_consent_point"],
+                         [817, 600])
+        self.assertIn("float_start_x", naruto["orientation_points"]["portrait"])
+        self.assertIn("float_start_x", naruto["orientation_points"]["landscape"])
+        self.assertEqual(naruto["stage1_wrong_foreground_checks"], 2)
+        self.assertGreaterEqual(naruto["lobby_icon_min_matches"], 3)
+        self.assertGreaterEqual(len(naruto["lobby_reference_paths"]), 2)
+        zenless = config["workflows"]["zenless_daily"]["steps"][0]
+        self.assertEqual(zenless["retry"], 1)
+        self.assertGreaterEqual(zenless["state_stall_overrides"]["^ç©ºæ´æ“ä½œå™¨ \\|"], 900)
+        self.assertEqual(config["failure_retry"]["max_attempts"], 2)
+        maa = config["workflows"]["daily_game"]["steps"][2]
+        self.assertEqual(maa["log_stall_seconds"], 1800)
+        star_rail = config["workflows"]["star_rail_daily"]["steps"][0]
+        self.assertEqual(star_rail["max_start_clicks"], 20)
+        self.assertIn("GitHub å‘ç°æ–°ç‰ˆæœ¬", star_rail["update_markers"])
+        watched = (("daily_game", 2), ("blue_archive_daily", 2),
+                   ("azur_lane_daily", 1), ("naruto_daily", 2),
+                   ("gumballs_daily", 2))
+        for workflow, index in watched:
+            step = config["workflows"][workflow]["steps"][index]
+            self.assertTrue(step["black_screen_watchdog"])
+            self.assertEqual(step["black_screen_timeout"], 300)
+
+    def test_naruto_retry_loops_check_optional_continue_before_clicking(self):
+        source = inspect.getsource(run_naruto_shadow)
+
+        enable_loop = source[source.index("enable_attempt = 0"):
+                             source.index("start_deadline =")]
+        self.assertLess(
+            enable_loop.index("click_shadow_continue_if_visible"),
+            enable_loop.index("enable_attempt += 1"),
+        )
+        self.assertIn("if continued.details.get(\"clicked\"):", enable_loop)
+        self.assertIn("é‡æ–°å¼€å§‹æœ¬è½®", enable_loop)
+        self.assertIn("confirm_shadow_enabled(enable_confirm_timeout)", enable_loop)
+        self.assertIn("æœ¬æ¬¡ä¸è§†ä¸ºå¯åŠ¨æˆåŠŸ", enable_loop)
+        self.assertIn("ensure_package_foreground(shadow_package)", enable_loop)
+        self.assertIn("find_ui_text_point_exact(\"å¯åŠ¨åŠŸèƒ½\")", enable_loop)
+
+        float_loop = source[source.index("while time.monotonic() < start_deadline"):
+                            source.index("if not game_started:")]
+        self.assertLess(
+            float_loop.index("click_shadow_continue_if_visible"),
+            float_loop.index("start_attempt += 1"),
+        )
+        self.assertIn("é‡æ–°è¯†åˆ«çº¢è‰²æµ®çª—", float_loop)
+        self.assertIn("inspect_float_primary_control(confirm_point)", float_loop)
+        self.assertIn("æœªè¯†åˆ«åˆ°æ–¹å½¢ç»ˆæ­¢ç¬¦", float_loop)
+        self.assertIn("confirm_game_foreground()", float_loop)
+        self.assertIn("æŒ‰æ¸¸æˆå¯åŠ¨æˆåŠŸå¤„ç†", float_loop)
+        self.assertNotIn("if game_focused:", float_loop)
+        self.assertIn("locate_float_icon_details()", float_loop)
+        self.assertIn("åŠç¼©åœ¨å³ä¾§è¾¹ç¼˜", float_loop)
+        self.assertIn("æµ®çª—ç‚¹å‡»å‰æ£€æµ‹åˆ°å…¶ä»–åº”ç”¨ä½äºå‰å°", float_loop)
+        self.assertIn("å–æ¶ˆæœ¬æ¬¡åæ ‡ç‚¹å‡»", float_loop)
+        self.assertNotIn("æœªçŸ¥ï¼ŒæŒ‰æ ¡å‡†åæ ‡å°è¯•", float_loop)
+
+        stage_one = source[source.index("# Stage 1:"):
+                           source.index("# Stage 2:")]
+        self.assertIn("stage1_wrong_foreground_checks", stage_one)
+        self.assertIn('"emulator_restart_requested": True', stage_one)
 
     def test_successful_workflow_and_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -147,7 +635,7 @@ class GameFlowTests(unittest.TestCase):
             result = run_adb({"action": "wait", "device": "emulator-5554",
                               "package": "com.test", "require_launcher": True,
                               "settle_seconds": 0, "timeout": 2}, ctx)
-            self.assertTrue(result.success)
+            self.assertTrue(result.success, result.message)
             self.assertTrue(result.details["boot_completed"])
 
     def test_baas_runner_follows_new_log_content(self):
@@ -175,6 +663,114 @@ class GameFlowTests(unittest.TestCase):
             with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
                 result = run_baas_gui(step, ctx)
             self.assertTrue(result.success)
+
+    def test_baas_queue_label_parser_accepts_current_and_legacy_labels(self):
+        self.assertEqual(_parse_baas_queue_count(["é˜Ÿåˆ—ä¸­  (0)"]), 0)
+        self.assertEqual(_parse_baas_queue_count(["é˜Ÿåˆ— (7)"]), 7)
+        self.assertEqual(_parse_baas_queue_count(["é˜Ÿåˆ—ä¸­", "ï¼ˆ12ï¼‰"]), 12)
+        self.assertIsNone(_parse_baas_queue_count(["ç­‰å¾…ä¸­ (8)", "é—²ç½®ä¸­"]))
+
+    def test_baas_runner_finishes_only_after_queue_is_empty_and_idle(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_start():
+                time.sleep(0.05)
+                log.write_text("å¼€å§‹æ‰§è¡Œã€å·¥ä½œä»»åŠ¡ã€‘\n", encoding="utf-8")
+
+            threading.Thread(target=write_start, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "require_empty_queue": True, "queue_check_interval": 0.05,
+                    "queue_empty_confirm_seconds": 0.05, "poll_seconds": 0.02,
+                    "log_stall_seconds": 2, "timeout": 3,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            states = [(2, False, "running"), (0, False, "last task running"),
+                      (0, True, "idle"), (0, True, "idle")]
+
+            def queue_state(_pid):
+                return states.pop(0) if len(states) > 1 else states[0]
+
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), patch(
+                    "gameflow.runners._read_baas_queue_count", side_effect=queue_state):
+                result = run_baas_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertEqual(result.details["queue_count"], 0)
+
+    def test_baas_queue_zero_and_success_log_finish_when_idle_state_is_unreadable(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_success():
+                time.sleep(0.05)
+                log.write_text("å¼€å§‹æ‰§è¡Œã€å·¥ä½œä»»åŠ¡ã€‘\nä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ\n", encoding="utf-8")
+
+            threading.Thread(target=write_success, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "require_empty_queue": True, "queue_check_interval": 0.03,
+                    "queue_empty_confirm_seconds": 0.03, "completion_quiet_seconds": 0.05,
+                    "poll_seconds": 0.01, "log_stall_seconds": 2, "timeout": 3,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            states = [(2, False, "running"), (0, False, "finishing"),
+                      (None, None, "temporarily unreadable")]
+
+            def queue_state(_pid):
+                return states.pop(0) if len(states) > 1 else states[0]
+
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), patch(
+                    "gameflow.runners._read_baas_queue_count", side_effect=queue_state):
+                result = run_baas_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertEqual(result.details["completion_mode"], "queue_zero_log_quiet")
+
+    def test_baas_ticket_shortage_is_nonfatal(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
+
+            def write_marker():
+                time.sleep(0.1)
+                (logs / "today_baas1.log").write_text(
+                    "æ¨¡æ‹Ÿå™¨è¿æ¥æˆåŠŸ\nå¼€å§‹æ‰§è¡Œã€æˆ˜æœ¯å¯¹æŠ—èµ›ã€‘\nå…¥åœºåˆ¸ä¸è¶³\n"
+                    "å¼€å§‹æ‰§è¡Œã€å·¥ä½œä»»åŠ¡ã€‘\næ‰§è¡Œå®Œæˆã€å·¥ä½œä»»åŠ¡ã€‘\nä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ\n",
+                    encoding="utf-8")
+
+            threading.Thread(target=write_marker, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "completion_marker": "ä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ",
+                    "error_markers": ["ä»»åŠ¡å…¨éƒ¨æ‰§è¡Œå¤±è´¥"],
+                    "ignored_error_markers": ["å…¥åœºåˆ¸ä¸è¶³"],
+                    "required_last_task": "å·¥ä½œä»»åŠ¡", "timeout": 3,
+                    "completion_quiet_seconds": 0.05,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_baas_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertTrue(any("éè‡´å‘½æç¤ºï¼šå…¥åœºåˆ¸ä¸è¶³" in message for message in messages))
 
     def test_blue_archive_reward_verification(self):
         import cv2
@@ -232,6 +828,7 @@ class GameFlowTests(unittest.TestCase):
             step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
                     "completion_marker": "ä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ", "required_last_task": "å·¥ä½œä»»åŠ¡",
                     "required_task_check_interval": 0.2, "completion_quiet_seconds": 0.1,
+                    "log_stall_seconds": 0.05,
                     "timeout": 5, "clean_existing": False, "close_on_complete": False,
                     "gui_click_fallback": False}
             with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
@@ -239,6 +836,44 @@ class GameFlowTests(unittest.TestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.details["last_completed_task"], "å·¥ä½œä»»åŠ¡")
             self.assertTrue(any("ä¸æ˜¯â€œå·¥ä½œä»»åŠ¡â€" in message for message in messages))
+
+    def test_baas_detects_log_stall_only_after_current_run_started(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def start_then_stall():
+                # The pre-start wait is deliberately longer than the stall threshold.
+                # It must remain governed by startup_timeout, not the running watchdog.
+                time.sleep(0.02)
+                log.write_text("æ—¥å¿—åˆå§‹åŒ–æˆåŠŸ\nå¼€å§‹æ£€æŸ¥ATX\n", encoding="utf-8")
+                time.sleep(0.1)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("å¼€å§‹æ‰§è¡Œã€å’–å•¡å…ã€‘\n")
+
+            threading.Thread(target=start_then_stall, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "start_markers": ["æ—¥å¿—åˆå§‹åŒ–æˆåŠŸ", "å¼€å§‹æ‰§è¡Œã€"],
+                    "log_stall_start_markers": ["å¼€å§‹æ‰§è¡Œã€"],
+                    "log_stall_seconds": 0.05, "startup_timeout": 0.5,
+                    "poll_seconds": 0.01, "timeout": 1,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_baas_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertTrue(result.details["log_stalled"])
+            self.assertTrue(result.details["retry_step"])
+            self.assertEqual(result.details["last_run_task"], "å’–å•¡å…")
+            self.assertGreaterEqual(result.details["log_stall_seconds"], 0.05)
 
     def test_baas_recoverable_atx_restart_does_not_abort(self):
         class FakeProcess:
@@ -284,6 +919,1061 @@ class GameFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
             logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
-        ç¯v¶‰ËkºwµçP (€€€€€€€€€€€€€€€€€€€€‹–º{’ú,ƒ–£––_š^—–âàèƒ–ò–/š&Ÿ¢†3’îï–*„°ƒšVÃ¦<è€Ô°ƒ–"šºÔèÁÉ¥µ…ÉäèĞ°ÑÉ…¥±¥¹œèÅq¸ˆ(€€€€€€€€€€€€€€€€€€€€‹–º{’ú,ƒ–£––_š^—–âàèƒ’îï–*‡š&Ÿ¢†3–’Ç¢Ò•q¸ˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤((€€€€€€€€€€€Ñ¡É•…‘¥¹œ¹Q¡É•…¡Ñ…É•ĞõİÉ¥Ñ•}±½œ°‘…•µ½¸õQÉÕ”¤¹ÍÑ…ÉĞ ¤(€€€€€€€€€€€ÍÑ•À€ôì‰•á•ÕÑ…‰±”ˆèÍÑÈ¡•á”¤°€‰±½}±½ˆˆèÍÑÈ¡±½Ì€¼€ˆÈÀüü´üü´üü´¨¹±½œˆ¤°(€€€€€€€€€€€€€€€€€€€€‰Ñ¥µ•½ÕĞˆè€È°€‰±•…¹}•á¥ÍÑ¥¹œˆè…±Í”°€‰±½Í•}½¹}½µÁ±•Ñ”ˆè…±Í”°(€€€€€€€€€€€€€€€€€€€€‰Õ¥}±¥­}™…±±‰…¬ˆè…±Í•ô(€€€€€€€€€€€İ¥Ñ Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÍÕ‰ÁÉ½•ÍÌ¹A½Á•¸ˆ°É•ÑÕÉ¹}Ù…±Õ”õ…­•AÉ½•ÍÌ ¤¤è(€€€€€€€€€€€€€€€É•ÍÕ±Ğ€ôÉÕ¹}µ……•¹‘}Õ¤¡ÍÑ•À°Ñà¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡É•ÍÕ±Ğ¹ÍÕ•ÍÌ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ%¸ ‹–ò–âãîOšv|ˆ°É•ÍÕ±Ğ¹µ•ÍÍ…”¤((€€€‘•˜Ñ•ÍÑ}µ……•¹‘}™É…µ•İ½É­}™…¥±ÕÉ•}…¹¹½Ñ}‰•}É•Á½ÉÑ•‘}…Í}ÍÕ•ÍÌ¡Í•±˜¤è(€€€€€€€±…ÍÌ…­•AÉ½•ÍÌè(€€€€€€€€€€€Á¥€ô€ÄÈÌĞÔØÜàä(€€€€€€€€€€€É•ÑÕÉ¹½‘”€ô9½¹”(€€€€€€€€€€€‘•˜Á½±°¡Í•±˜¤èÉ•ÑÕÉ¸9½¹”(€€€€€€€€€€€‘•˜Ñ•Éµ¥¹…Ñ”¡Í•±˜¤èÍ•±˜¹É•ÑÕÉ¹½‘”€ô€À((€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤ì•á”€ôÉ½½Ğ€¼€‰5……¹¹•á”ˆì•á”¹İÉ¥Ñ•}‰åÑ•Ì¡ˆˆˆ¤(€€€€€€€€€€€±½Ì€ôÉ½½Ğ€¼€‰‘•‰Õœˆì±½Ì¹µ­‘¥È ¤(€€€€€€€€€€€¡¥ €ô±½Ì€¼€ˆÈÀÈØ´ÀÜ´Äà´Ä¹±½œˆì¡¥ ¹İÉ¥Ñ•}Ñ•áĞ ˆˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€™É…µ•İ½É¬€ô±½Ì€¼€‰µ……™Ü¹±½œˆì™É…µ•İ½É¬¹İÉ¥Ñ•}Ñ•áĞ ˆˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€Ñà€ôIÕ¹½¹Ñ•áĞ¡É½½Ğ°íô°±…µ‰‘„|è9½¹”°Ñ¡É•…‘¥¹œ¹Ù•¹Ğ ¤¤((€€€€€€€€€€€‘•˜İÉ¥Ñ•}™…¥±ÕÉ” ¤è(€€€€€€€€€€€€€€€Ñ¥µ”¹Í±••À À¸Ä¤(€€€€€€€€€€€€€€€¡¥ ¹İÉ¥Ñ•}Ñ•áĞ (€€€€€€€€€€€€€€€€€€€€‹–º{’ú,ƒ–£––_š^—–âàèƒ–ò–/š&Ÿ¢†3’îï–*„°ƒšVÃ¦<è€Ô°ƒ–"šºÔèÁÉ¥µ…ÉäèĞ°ÑÉ…¥±¥¹œèÅq¸ˆ(€€€€€€€€€€€€€€€€€€€€‹–º{’ú,ƒ–£––_š^—–âàèƒ’îï–*‡–ŞËš>C’ê°Ñ…Í­}¥‘ÌèlÄ°È°Ì°Ğ°Õuq¸ˆ(€€€€€€€€€€€€€€€€€€€€‹–º{’ú,ƒ–£––_š^—–âàèƒšRÛ–Âûšº×–"š6‹’âèÕµµä½¹ÑÉ½±±•Éq¸ˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€€€€€™É…µ•İ½É¬¹İÉ¥Ñ•}Ñ•áĞ (€€€€€€€€€€€€€€€€€€€€œ„„…=¹Ù•¹Ñ9½Ñ¥™ä„„„mµÍœõQ…Í­•È¹Q…Í¬¹…¥±•‘t€œ(€€€€€€€€€€€€€€€€€€€€m‘•Ñ…¥±Ìõì‰•¹ÑÉäˆè‰…¥±åI•İ…É‘MÑ…ÉĞˆ°‰Ñ…Í­}¥ˆèÑõuq¸œ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤((€€€€€€€€€€€Ñ¡É•…‘¥¹œ¹Q¡É•…¡Ñ…É•ĞõİÉ¥Ñ•}™…¥±ÕÉ”°‘…•µ½¸õQÉÕ”¤¹ÍÑ…ÉĞ ¤(€€€€€€€€€€€ÍÑ•À€ôì‰•á•ÕÑ…‰±”ˆèÍÑÈ¡•á”¤°€‰±½}±½ˆˆèÍÑÈ¡±½Ì€¼€ˆÈÀüü´üü´üü´¨¹±½œˆ¤°(€€€€€€€€€€€€€€€€€€€€‰™É…µ•İ½É­}±½}Á…Ñ ˆèÍÑÈ¡™É…µ•İ½É¬¤°€‰Ñ¥µ•½ÕĞˆè€Ì°(€€€€€€€€€€€€€€€€€€€€‰±•…¹}•á¥ÍÑ¥¹œˆè…±Í”°€‰±½Í•}½¹}½µÁ±•Ñ”ˆè…±Í”°(€€€€€€€€€€€€€€€€€€€€‰Õ¥}±¥­}™…±±‰…¬ˆè…±Í”°€‰…µ•}ÁÉ½•ÍÍ}¥µ…”ˆè€‰¹‘™¥•±¹•á”ˆ°(€€€€€€€€€€€€€€€€€€€€‰ÍÉ••¹Í¡½Ñ}Á…Ñ ˆèÍÑÈ¡É½½Ğ€¼€‰•¹‘™¥•±¹Á¹œˆ¥ô(€€€€€€€€€€€İ¥Ñ Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÍÕ‰ÁÉ½•ÍÌ¹A½Á•¸ˆ°É•ÑÕÉ¹}Ù…±Õ”õ…­•AÉ½•ÍÌ ¤¤°p(€€€€€€€€€€€€€€€€€€€Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÉÕ¹}İ¥¹‘½İ}ÍÉ••¹Í¡½Ğˆ°(€€€€€€€€€€€€€€€€€€€€€€€€€É•ÑÕÉ¹}Ù…±Õ”õI•ÍÕ±Ğ¡QÉÕ”°€‰Í…Ù•ˆ¤¤è(€€€€€€€€€€€€€€€É•ÍÕ±Ğ€ôÉÕ¹}µ……•¹‘}Õ¤¡ÍÑ•À°Ñà¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡É•ÍÕ±Ğ¹ÍÕ•ÍÌ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ%¸ ‰…¥±åI•İ…É‘MÑ…ÉĞˆ°É•ÍÕ±Ğ¹µ•ÍÍ…”¤((€€€‘•˜Ñ•ÍÑ}µ……•¹‘}ÕÁ‘…Ñ•}µ…É­•É}‰•½µ•Í}¹••‘Í}ÕÁ‘…Ñ”¡Í•±˜¤è(€€€€€€€±…ÍÌ…­•AÉ½•ÍÌè(€€€€€€€€€€€Á¥€ô€ÄÈÌĞÔØÜàä(€€€€€€€€€€€É•ÑÕÉ¹½‘”€ô9½¹”(€€€€€€€€€€€‘•˜Á½±°¡Í•±˜¤èÉ•ÑÕÉ¸9½¹”(€€€€€€€€€€€‘•˜Ñ•Éµ¥¹…Ñ”¡Í•±˜¤èÍ•±˜¹É•ÑÕÉ¹½‘”€ô€À((€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤ì•á”€ôÉ½½Ğ€¼€‰5……¹¹•á”ˆì•á”¹İÉ¥Ñ•}‰åÑ•Ì¡ˆˆˆ¤(€€€€€€€€€€€±½Ì€ôÉ½½Ğ€¼€‰‘•‰Õœˆì±½Ì¹µ­‘¥È ¤(€€€€€€€€€€€Ñà€ôIÕ¹½¹Ñ•áĞ¡É½½Ğ°íô°±…µ‰‘„|è9½¹”°Ñ¡É•…‘¥¹œ¹Ù•¹Ğ ¤¤((€€€€€€€€€€€‘•˜İÉ¥Ñ•}±½œ ¤è(€€€€€€€€€€€€€€€Ñ¥µ”¹Í±••À À¸ÀÔ¤(€€€€€€€€€€€€€€€€¡±½Ì€¼€ˆÈÀÈØ´ÀÜ´ÄÔ´Ä¹±½œˆ¤¹İÉ¥Ñ•}Ñ•áĞ (€€€€€€€€€€€€€€€€€€€€‹šnÓšZÃšš~—–º3š"@èƒšršZÃ&#šr°õØä¸ä¸ä°ƒšr'šnÓšZÀõÑÉÕ•q¸ˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤((€€€€€€€€€€€Ñ¡É•…‘¥¹œ¹Q¡É•…¡Ñ…É•ĞõİÉ¥Ñ•}±½œ°‘…•µ½¸õQÉÕ”¤¹ÍÑ…ÉĞ ¤(€€€€€€€€€€€ÍÑ•À€ôì‰•á•ÕÑ…‰±”ˆèÍÑÈ¡•á”¤°€‰±½}±½ˆˆèÍÑÈ¡±½Ì€¼€ˆÈÀüü´üü´üü´¨¹±½œˆ¤°(€€€€€€€€€€€€€€€€€€€€‰Ñ¥µ•½ÕĞˆè€È°€‰±•…¹}•á¥ÍÑ¥¹œˆè…±Í”°€‰±½Í•}½¹}½µÁ±•Ñ”ˆè…±Í”°(€€€€€€€€€€€€€€€€€€€€‰Õ¥}±¥­}™…±±‰…¬ˆè…±Í•ô(€€€€€€€€€€€İ¥Ñ Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÍÕ‰ÁÉ½•ÍÌ¹A½Á•¸ˆ°É•ÑÕÉ¹}Ù…±Õ”õ…­•AÉ½•ÍÌ ¤¤è(€€€€€€€€€€€€€€€É•ÍÕ±Ğ€ôÉÕ¹}µ……•¹‘}Õ¤¡ÍÑ•À°Ñà¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡É•ÍÕ±Ğ¹ÍÕ•ÍÌ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡É•ÍÕ±Ğ¹ÍÑ…ÑÕÌ°€‰¹••‘Í}ÕÁ‘…Ñ”ˆ¤((€€€‘•˜Ñ•ÍÑ}•¹¥¹•}ÁÉ½Á……Ñ•Í}¹••‘Í}ÕÁ‘…Ñ•}ÍÑ…ÑÕÌ¡Í•±˜¤è(€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤ìÍÑ½É”€ôMÑ½É”¡É½½Ğ€¼€‰‘ˆ¹ÍÅ±¥Ñ”ˆ¤(€€€€€€€€€€€½¹™¥œ€ôì‰İ½É­™±½İÌˆèì‰‘…¥±äˆèì‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€ì‰¥ˆè€‰Ù•ÉÍ¥½¸ˆ°€‰ÉÕ¹¹•Èˆè€‰™…­•}ÕÁ‘…Ñ”‰ô(€€€€€€€€€€€uõõô(€€€€€€€€€€€İ¥Ñ Á…Ñ ¹‘¥Ğ¡IU99IL°ì‰™…­•}ÕÁ‘…Ñ”ˆè±…µ‰‘„ÍÑ•À°ÑàèI•ÍÕ±Ğ (€€€€€€€€€€€€€€€€€€€…±Í”°€‹šâãš"?¦r¢ššnÓšZÀˆ°ì‰µ…É­•Èˆè€‰ÕÁ‘…Ñ”‰ô°€‰¹••‘Í}ÕÁ‘…Ñ”ˆ¥ô¤è(€€€€€€€€€€€€€€€•¹¥¹”€ô¹¥¹”¡É½½Ğ°½¹™¥œ°ÍÑ½É”¤(€€€€€€€€€€€€€€€•¹¥¹”¹ÍÑ…ÉĞ ‰‘…¥±äˆ¤(€€€€€€€€€€€€€€€•¹¥¹”¹©½¥¸ È¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡•¹¥¹”¹ÍÑ…Ñ” ¥l‰±…ÍÑ}ÍÑ…ÑÕÌ‰t°€‰¹••‘Í}ÕÁ‘…Ñ”ˆ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡ÍÑ½É”¹É••¹Ğ ¥lÁul‰ÍÑ…ÑÕÌ‰t°€‰¹••‘Í}ÕÁ‘…Ñ”ˆ¤((€€€‘•˜Ñ•ÍÑ}±½}Õ¥}‘…¥±å}É•ÑÉ¥•Í}±¥­}…¹‘}…ÁÑÕÉ•Í}É•İ…É¡Í•±˜¤è(€€€€€€€±…ÍÌ…­•AÉ½•ÍÌè(€€€€€€€€€€€Á¥€ô€ÄÈÌĞÔØÜàä(€€€€€€€€€€€É•ÑÕÉ¹½‘”€ô9½¹”(€€€€€€€€€€€‘•˜Á½±°¡Í•±˜¤èÉ•ÑÕÉ¸9½¹”(€€€€€€€€€€€‘•˜Ñ•Éµ¥¹…Ñ”¡Í•±˜¤èÍ•±˜¹É•ÑÕÉ¹½‘”€ô€À((€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤ì•á”€ôÉ½½Ğ€¼€‰1…Õ¹¡•È¹•á”ˆì•á”¹İÉ¥Ñ•}‰åÑ•Ì¡ˆˆˆ¤(€€€€€€€€€€€±½œ€ôÉ½½Ğ€¼€‰‘…¥±ä¹±½œˆì±½œ¹İÉ¥Ñ•}Ñ•áĞ ˆˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€Ñà€ôIÕ¹½¹Ñ•áĞ¡É½½Ğ°íô°±…µ‰‘„|è9½¹”°Ñ¡É•…‘¥¹œ¹Ù•¹Ğ ¤¤((€€€€€€€€€€€‘•˜İÉ¥Ñ•}±½œ ¤è(€€€€€€€€€€€€€€€Ñ¥µ”¹Í±••À À¸Ì¤(€€€€€€€€€€€€€€€±½œ¹İÉ¥Ñ•}Ñ•áĞ ‰IU8MQIQq¹I]IAq¹10=9q¸ˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤((€€€€€€€€€€€Ñ¡É•…‘¥¹œ¹Q¡É•…¡Ñ…É•ĞõİÉ¥Ñ•}±½œ°‘…•µ½¸õQÉÕ”¤¹ÍÑ…ÉĞ ¤(€€€€€€€€€€€ÍÑ•À€ôì‰‘¥ÍÁ±…å}¹…µ”ˆè€‹šÖ/¢¾Wš¾?š^”ˆ°€‰•á•ÕÑ…‰±”ˆèÍÑÈ¡•á”¤°(€€€€€€€€€€€€€€€€€€€€‰±½}±½ˆˆèÍÑÈ¡±½œ¤°€‰ÁÉ½•ÍÍ}¥µ…•Ìˆèl‰1…Õ¹¡•È¹•á”‰t°(€€€€€€€€€€€€€€€€€€€€‰‰ÕÑÑ½¹}¹…µ•Ìˆèl‹–º3šVÓ¢şC¢†0‰t°€‰Ñ¥Ñ±•}¡¥¹ÑÌˆèl‰Q•ÍĞ‰t°(€€€€€€€€€€€€€€€€€€€€‰±½}É•ÑÉå}¥¹Ñ•ÉÙ…°ˆè€À¸ÀÔ°€‰ÍÑ…ÉÑ}µ…É­•ÉÌˆèl‰IU8MQIP‰t°(€€€€€€€€€€€€€€€€€€€€‰½µÁ±•Ñ¥½¹}µ…É­•ÉÌˆèl‰10=9‰t°(€€€€€€€€€€€€€€€€€€€€‰ÍÉ••¹Í¡½Ñ}µ…É­•ÉÌˆèl‰I]IA‰t°(€€€€€€€€€€€€€€€€€€€€‰ÍÉ••¹Í¡½Ñ}Á…Ñ ˆèÍÑÈ¡É½½Ğ€¼€‰É•İ…É¹Á¹œˆ¤°(€€€€€€€€€€€€€€€€€€€€‰‰É¥¹}…µ•}Ñ½}™É½¹ĞˆèQÉÕ”°€‰…µ•}ÁÉ½•ÍÍ}¥µ…”ˆè€‰…µ”¹•á”ˆ°(€€€€€€€€€€€€€€€€€€€€‰½µÁ±•Ñ¥½¹}ÅÕ¥•Ñ}Í•½¹‘Ìˆè€À¸ÀÔ°(€€€€€€€€€€€€€€€€€€€€‰Ñ¥µ•½ÕĞˆè€È°€‰±•…¹}•á¥ÍÑ¥¹œˆè…±Í”°€‰±½Í•}½¹}½µÁ±•Ñ”ˆè…±Í•ô(€€€€€€€€€€€İ¥Ñ Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÍÕ‰ÁÉ½•ÍÌ¹A½Á•¸ˆ°É•ÑÕÉ¹}Ù…±Õ”õ…­•AÉ½•ÍÌ ¤¤°p(€€€€€€€€€€€€€€€€€€€Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹}±¥­}¹…µ•‘}Õ¥}‰ÕÑÑ½¸ˆ°(€€€€€€€€€€€€€€€€€€€€€€€€€É•ÑÕÉ¹}Ù…±Õ”ô¡QÉÕ”°€‰±¥­•ˆ¤¤…Ì±¥¬°p(€€€€€€€€€€€€€€€€€€€Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹}‰É¥¹}…µ•}İ¥¹‘½İ}Ñ½}™É½¹Ğˆ°(€€€€€€€€€€€€€€€€€€€€€€€€€É•ÑÕÉ¹}Ù…±Õ”õI•ÍÕ±Ğ¡QÉÕ”°€‰™½É•É½Õ¹ˆ¤¤…Ì™½É•É½Õ¹°p(€€€€€€€€€€€€€€€€€€€Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÉÕ¹}İ¥¹‘½İ}ÍÉ••¹Í¡½Ğˆ°(€€€€€€€€€€€€€€€€€€€€€€€€€É•ÑÕÉ¹}Ù…±Õ”õI•ÍÕ±Ğ¡QÉÕ”°€‰Í…Ù•ˆ¤¤…ÌÍÉ••¹Í¡½Ğè(€€€€€€€€€€€€€€€É•ÍÕ±Ğ€ôÉÕ¹}±½}Õ¥}‘…¥±ä¡ÍÑ•À°Ñà¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡É•ÍÕ±Ğ¹ÍÕ•ÍÌ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÉ•…Ñ•ÉÅÕ…°¡±¥¬¹…±±}½Õ¹Ğ°€È¤(€€€€€€€€€€€™½É•É½Õ¹¹…ÍÍ•ÉÑ}…±±•‘}½¹” ¤(€€€€€€€€€€€ÍÉ••¹Í¡½Ğ¹…ÍÍ•ÉÑ}…±±•‘}½¹” ¤((€€€‘•˜Ñ•ÍÑ}±½}Õ¥}‘…¥±å}ÍÑ…±±•‘}ÍÑ…Ñ•}™…¥±Í}İ¥Ñ¡}ÕÉÉ•¹Ñ}ÍÉ••¹Í¡½Ğ¡Í•±˜¤è(€€€€€€€±…ÍÌ…­•AÉ½•ÍÌè(€€€€€€€€€€€Á¥€ô€ÄÈÌĞÔØÜàä(€€€€€€€€€€€É•ÑÕÉ¹½‘”€ô9½¹”(€€€€€€€€€€€İÉ½Ñ”€ô…±Í”(€€€€€€€€€€€‘•˜Á½±°¡Í•±˜¤è(€€€€€€€€€€€€€€€¥˜¹½ĞÍ•±˜¹İÉ½Ñ”è(€€€€€€€€€€€€€€€€€€€Í•±˜¹İÉ½Ñ”€ôQÉÕ”(€€€€€€€€€€€€€€€€€€€±½œ¹İÉ¥Ñ•}Ñ•áĞ (€€€€€€€€€€€€€€€€€€€€€€€€‰IU8MQIQq»š2’î‘lƒ–ëš"`tƒ¢*
-äƒššÖ/šâãš"?ª_–>Œ€´øƒ–ëš"`ƒ¢şS–n{*Ûšƒš2'¦J¸·–ëš"aq¸ˆ°(€€€€€€€€€€€€€€€€€€€€€€€•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸9½¹”(€€€€€€€€€€€‘•˜Ñ•Éµ¥¹…Ñ”¡Í•±˜¤èÍ•±˜¹É•ÑÕÉ¹½‘”€ô€À((€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤ì•á”€ôÉ½½Ğ€¼€‰1…Õ¹¡•È¹•á”ˆì•á”¹İÉ¥Ñ•}‰åÑ•Ì¡ˆˆˆ¤(€€€€€€€€€€€±½œ€ôÉ½½Ğ€¼€‰‘…¥±ä¹±½œˆì±½œ¹İÉ¥Ñ•}Ñ•áĞ ˆˆ°•¹½‘¥¹œô‰ÕÑ˜´àˆ¤(€€€€€€€€€€€Ñà€ôIÕ¹½¹Ñ•áĞ¡É½½Ğ°íô°±…µ‰‘„|è9½¹”°Ñ¡É•…‘¥¹œ¹Ù•¹Ğ ¤¤(€€€€€€€€€€€ÍÑ•À€ôì‰‘¥ÍÁ±…å}¹…µ”ˆè€‹šÖ/¢¾Wš¾?š^”ˆ°€‰•á•ÕÑ…‰±”ˆèÍÑÈ¡•á”¤°(€€€€€€€€€€€€€€€€€€€€‰±½}±½ˆˆèÍÑÈ¡±½œ¤°€‰ÁÉ½•ÍÍ}¥µ…•Ìˆèl‰1…Õ¹¡•È¹•á”‰t°(€€€€€€€€€€€€€€€€€€€€‰ÍÑ…ÉÑ}µ…É­•ÉÌˆèl‰IU8MQIP‰t°€‰±½}É•ÑÉå}¥¹Ñ•ÉÙ…°ˆè€À¸ÀÄ°(€€€€€€€€€€€€€€€€€€€€‰ÍÑ…Ñ•}İ…Ñ¡‘½}É••àˆèÈ‹š2’î‘qmqÌ¨¡myqut¬¥qÌ©quqÌ«¢*
-åqÌ¨ ¸¨ü¥qÌ¨´ø¸¨ÿ¢şS–n{*ÛšqÌ¨ ¸¨¤ˆ°(€€€€€€€€€€€€€€€€€€€€‰ÍÑ…Ñ•}ÍÑ…±±}Í•½¹‘Ìˆè€À¸ÀÔ°€‰ÍÑ…Ñ•}É•½Ù•Éå}Í•½¹‘Ìˆè€À¸ÀÔ°(€€€€€€€€€€€€€€€€€€€€‰…µ•}ÁÉ½•ÍÍ}¥µ…”ˆè€‰…µ”¹•á”ˆ°€‰ÍÉ••¹Í¡½Ñ}Á…Ñ ˆèÍÑÈ¡É½½Ğ€¼€‰™…¥±ÕÉ”¹Á¹œˆ¤°(€€€€€€€€€€€€€€€€€€€€‰¥¹¥Ñ¥…±}±¥­}‘•±…äˆè€ÄÀ°(€€€€€€€€€€€€€€€€€€€€‰Ñ¥µ•½ÕĞˆè€Ì°€‰±•…¹}•á¥ÍÑ¥¹œˆè…±Í”°€‰±½Í•}½¹}½µÁ±•Ñ”ˆè…±Í•ô(€€€€€€€€€€€İ¥Ñ Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÍÕ‰ÁÉ½•ÍÌ¹A½Á•¸ˆ°É•ÑÕÉ¹}Ù…±Õ”õ…­•AÉ½•ÍÌ ¤¤°p(€€€€€€€€€€€€€€€€€€€Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹}‰É¥¹}…µ•}İ¥¹‘½İ}Ñ½}™É½¹Ğˆ°(€€€€€€€€€€€€€€€€€€€€€€€€€É•ÑÕÉ¹}Ù…±Õ”õI•ÍÕ±Ğ¡QÉÕ”°€‰™½É•É½Õ¹ˆ¤¤°p(€€€€€€€€€€€€€€€€€€€Á…Ñ  ‰…µ•™±½Ü¹ÉÕ¹¹•ÉÌ¹ÉÕ¹}İ¥¹‘½İ}ÍÉ••¹Í¡½Ğˆ°(€€€€€€€€€€€€€€€€€€€€€€€€€É•ÑÕÉ¹}Ù…±Õ”õI•ÍÕ±Ğ¡QÉÕ”°€‰Í…Ù•ˆ¤¤…ÌÍÉ••¹Í¡½Ğè(€€€€€€€€€€€€€€€É•ÍÕ±Ğ€ôÉÕ¹}±½}Õ¥}‘…¥±ä¡ÍÑ•À°Ñà¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡É•ÍÕ±Ğ¹ÍÕ•ÍÌ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ%¸ ‹š2'¦J¸·–ëš"`ˆ°É•ÍÕ±Ğ¹µ•ÍÍ…”¤(€€€€€€€€€€€ÍÉ••¹Í¡½Ğ¹…ÍÍ•ÉÑ}…±±• ¤((€€€‘•˜Ñ•ÍÑ}•á±ÕÍ¥Ù•}‘…¥±å}É½ÕÁ}¹•Ù•É}ÉÕ¹Í}Ñ½•Ñ¡•È¡Í•±˜¤è(€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤ìÍÑ½É”€ôMÑ½É”¡É½½Ğ€¼€‰‘ˆ¹ÍÅ±¥Ñ”ˆ¤(€€€€€€€€€€€½¹™¥œ€ôì‰İ½É­™±½İÌˆèì(€€€€€€€€€€€€€€€€‰•¹‘™¥•±ˆèì‰•á±ÕÍ¥Ù•}É½ÕÀˆè€‰Á}É½ÕÀˆ°€‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰•¹‘™¥•±ˆ°€‰ÉÕ¹¹•Èˆè€‰É•½É‰õuô°(€€€€€€€€€€€€€€€€‰é•¹±•ÍÌˆèì‰•á±ÕÍ¥Ù•}É½ÕÀˆè€‰Á}É½ÕÀˆ°€‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰é•¹±•ÍÌˆ°€‰ÉÕ¹¹•Èˆè€‰É•½É‰õuô°(€€€€€€€€€€€€€€€€‰ÍÑ…ÉÉ…¥°ˆèì‰•á±ÕÍ¥Ù•}É½ÕÀˆè€‰Á}É½ÕÀˆ°€‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰ÍÑ…ÉÉ…¥°ˆ°€‰ÉÕ¹¹•Èˆè€‰É•½É‰õuô°(€€€€€€€€€€€õô(€€€€€€€€€€€¥¹Ñ•ÉÙ…±Ì€ôíô((€€€€€€€€€€€‘•˜É•½É¡ÍÑ•À°Ñà¤è(€€€€€€€€€€€€€€€¥¹Ñ•ÉÙ…±ÍmÍÑ•Ál‰¥‰ut€ômÑ¥µ”¹µ½¹½Ñ½¹¥Œ ¤°9½¹•t(€€€€€€€€€€€€€€€Ñ¥µ”¹Í±••À À¸Àà¤(€€€€€€€€€€€€€€€¥¹Ñ•ÉÙ…±ÍmÍÑ•Ál‰¥‰uulÅt€ôÑ¥µ”¹µ½¹½Ñ½¹¥Œ ¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸I•ÍÕ±Ğ¡QÉÕ”°€‰‘½¹”ˆ¤((€€€€€€€€€€€İ¥Ñ Á…Ñ ¹‘¥Ğ¡IU99IL°ì‰É•½ÉˆèÉ•½É‘ô¤è(€€€€€€€€€€€€€€€µ…¹…•È€ô]½É­™±½İ5…¹…•È¡É½½Ğ°½¹™¥œ°ÍÑ½É”¤(€€€€€€€€€€€€€€€½¬°|€ôµ…¹…•È¹ÍÑ…ÉÑ}‘…¥±ä¡l‰•¹‘™¥•±ˆ°€‰é•¹±•ÍÌˆ°€‰ÍÑ…ÉÉ…¥°‰t°€È¤(€€€€€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡½¬¤(€€€€€€€€€€€€€€€µ…¹…•È¹©½¥¸ Ì¤(€€€€€€€€€€€½É‘•É•€ôÍ½ÉÑ•¡¥¹Ñ•ÉÙ…±Ì¹Ù…±Õ•Ì ¤°­•äõ±…µ‰‘„¥Ñ•´è¥Ñ•µlÁt¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡±•¸¡½É‘•É•¤°€Ì¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡…±°¡½É‘•É•‘m¥¹‘•áulÅt€ğô½É‘•É•‘m¥¹‘•à€¬€ÅulÁt(€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€™½È¥¹‘•à¥¸É…¹” È¤¤¤((€€€‘•˜Ñ•ÍÑ}µ…¹Õ…±}ÍÑ…ÉÑ}É•ÍÁ•ÑÍ}•á±ÕÍ¥Ù•}É½ÕÀ¡Í•±˜¤è(€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤(€€€€€€€€€€€½¹™¥œ€ôì‰İ½É­™±½İÌˆèì(€€€€€€€€€€€€€€€€‰•¹‘™¥•±ˆèì‰•á±ÕÍ¥Ù•}É½ÕÀˆè€‰Á}É½ÕÀˆ°€‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰İ…¥Ğˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸Íõuô°(€€€€€€€€€€€€€€€€‰é•¹±•ÍÌˆèì‰•á±ÕÍ¥Ù•}É½ÕÀˆè€‰Á}É½ÕÀˆ°€‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰İ…¥Ğˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÀÅõuô°(€€€€€€€€€€€õô(€€€€€€€€€€€µ…¹…•È€ô]½É­™±½İ5…¹…•È¡É½½Ğ°½¹™¥œ°MÑ½É”¡É½½Ğ€¼€‰‘ˆ¹ÍÅ±¥Ñ”ˆ¤¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡µ…¹…•È¹ÍÑ…ÉĞ ‰•¹‘™¥•±ˆ¥lÁt¤(€€€€€€€€€€€½¬°µ•ÍÍ…”€ôµ…¹…•È¹ÍÑ…ÉĞ ‰é•¹±•ÍÌˆ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡½¬¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ%¸ ‹’â7¢÷–B3š^Ûš&Ÿ¢†0ˆ°µ•ÍÍ…”¤(€€€€€€€€€€€µ…¹…•È¹ÍÑ½À ¤ìµ…¹…•È¹©½¥¸ È¤((€€€‘•˜Ñ•ÍÑ}•áÁ±¥¥Ñ}•á±ÕÍ¥Ù•}İ¥Ñ¡}¥Í}Íåµµ•ÑÉ¥Œ¡Í•±˜¤è(€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤(€€€€€€€€€€€½¹™¥œ€ôì‰İ½É­™±½İÌˆèì(€€€€€€€€€€€€€€€€‰…±…Ìˆèì‰•á±ÕÍ¥Ù•}İ¥Ñ ˆèl‰¹…ÉÕÑ¼‰t°€‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰İ…¥Ğˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸Íõuô°(€€€€€€€€€€€€€€€€‰¹…ÉÕÑ¼ˆèì‰ÍÑ•ÁÌˆèl(€€€€€€€€€€€€€€€€€€€ì‰¥ˆè€‰İ…¥Ğˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÀÅõuô°(€€€€€€€€€€€õô(€€€€€€€€€€€µ…¹…•È€ô]½É­™±½İ5…¹…•È¡É½½Ğ°½¹™¥œ°MÑ½É”¡É½½Ğ€¼€‰‘ˆ¹ÍÅ±¥Ñ”ˆ¤¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡µ…¹…•È¹ÍÑ…ÉĞ ‰¹…ÉÕÑ¼ˆ¥lÁt¤(€€€€€€€€€€€½¬°µ•ÍÍ…”€ôµ…¹…•È¹ÍÑ…ÉĞ ‰…±…Ìˆ¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡½¬¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ%¸ ‹’â7¢÷–B3š^Ûš&Ÿ¢†0ˆ°µ•ÍÍ…”¤(€€€€€€€€€€€µ…¹…•È¹ÍÑ½À ¤ìµ…¹…•È¹©½¥¸ È¤((€€€‘•˜Ñ•ÍÑ}‘…¥±å}‰…Ñ¡}Á…É…±±•±}…¹‘}Í•É¥…°¡Í•±˜¤è(€€€€€€€‘•˜ÉÕ¹}‰…Ñ ¡Á…É…±±•°¤è(€€€€€€€€€€€ÑµÀ€ôÑ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¹¹…µ”¤(€€€€€€€€€€€½¹™¥œ€ôì‰İ½É­™±½İÌˆèì(€€€€€€€€€€€€€€€€‰„ˆèì‰ÍÑ•ÁÌˆèmì‰¥ˆè€‰„ˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÌÕõuô°(€€€€€€€€€€€€€€€€‰ˆˆèì‰ÍÑ•ÁÌˆèmì‰¥ˆè€‰ˆˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÌÕõuô(€€€€€€€€€€€õô(€€€€€€€€€€€µ…¹…•È€ô]½É­™±½İ5…¹…•È¡É½½Ğ°½¹™¥œ°MÑ½É”¡É½½Ğ€¼€‰‘ˆ¹ÍÅ±¥Ñ”ˆ¤¤(€€€€€€€€€€€ÍÑ…ÉÑ•€ôÑ¥µ”¹µ½¹½Ñ½¹¥Œ ¤(€€€€€€€€€€€½¬°|€ôµ…¹…•È¹ÍÑ…ÉÑ}‘…¥±ä¡l‰„ˆ°€‰ˆ‰t°Á…É…±±•°¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡½¬¤(€€€€€€€€€€€µ…¹…•È¹©½¥¸ Ô¤(€€€€€€€€€€€•±…ÁÍ•€ôÑ¥µ”¹µ½¹½Ñ½¹¥Œ ¤€´ÍÑ…ÉÑ•(€€€€€€€€€€€½µÁ±•Ñ•€ôµ…¹…•È¹ÍÑ…Ñ” ¥l‰‰…Ñ ‰ul‰½µÁ±•Ñ•‰t(€€€€€€€€€€€ÑµÀ¹±•…¹ÕÀ ¤(€€€€€€€€€€€É•ÑÕÉ¸•±…ÁÍ•°½µÁ±•Ñ•((€€€€€€€Í•É¥…±}Ñ¥µ”°Í•É¥…±}‘½¹”€ôÉÕ¹}‰…Ñ  Ä¤(€€€€€€€Á…É…±±•±}Ñ¥µ”°Á…É…±±•±}‘½¹”€ôÉÕ¹}‰…Ñ  È¤(€€€€€€€Í•±˜¹…ÍÍ•ÉÑÉ•…Ñ•È¡Í•É¥…±}Ñ¥µ”°€À¸Ø¤(€€€€€€€Í•±˜¹…ÍÍ•ÉÑ1•ÍÌ¡Á…É…±±•±}Ñ¥µ”°Í•É¥…±}Ñ¥µ”€¨€À¸à¤(€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡mál‰İ½É­™±½Ü‰t™½Èà¥¸Í•É¥…±}‘½¹•t°l‰„ˆ°€‰ˆ‰t¤(€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡…±°¡ál‰ÍÑ…ÑÕÌ‰t€ôô€‰ÍÕ•ÍÌˆ™½Èà¥¸Á…É…±±•±}‘½¹”¤¤((€€€‘•˜Ñ•ÍÑ}‘…¥±å}‰…Ñ¡}Í•±•Ñ¥½¹}…¹‘}±¥µ¥Ğ¡Í•±˜¤è(€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤(€€€€€€€€€€€½¹™¥œ€ôì‰İ½É­™±½İÌˆèì(€€€€€€€€€€€€€€€€‰„ˆèì‰ÍÑ•ÁÌˆèmì‰¥ˆè€‰„ˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÀÕõuô°(€€€€€€€€€€€€€€€€‰ˆˆèì‰ÍÑ•ÁÌˆèmì‰¥ˆè€‰ˆˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÀÕõuô°(€€€€€€€€€€€€€€€€‰Í•±™}Ñ•ÍĞˆèì‰ÍÑ•ÁÌˆèmì‰¥ˆè€‰àˆ°€‰ÉÕ¹¹•Èˆè€‰‘•±…äˆ°€‰Í•½¹‘Ìˆè€À¸ÀÕõuô(€€€€€€€€€€€õô(€€€€€€€€€€€µ…¹…•È€ô]½É­™±½İ5…¹…•È¡É½½Ğ°½¹™¥œ°MÑ½É”¡É½½Ğ€¼€‰‘ˆ¹ÍÅ±¥Ñ”ˆ¤¤(€€€€€€€€€€€½¬°|€ôµ…¹…•È¹ÍÑ…ÉÑ}‘…¥±ä¡l‰ˆˆ°€‰Í•±™}Ñ•ÍĞ‰t°€ä¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑQÉÕ”¡½¬¤(€€€€€€€€€€€µ…¹…•È¹©½¥¸ Ô¤(€€€€€€€€€€€‰…Ñ €ôµ…¹…•È¹ÍÑ…Ñ” ¥l‰‰…Ñ ‰t(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡‰…Ñ¡l‰µ…á}Á…É…±±•°‰t°€Ä¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑÅÕ…°¡mál‰İ½É­™±½Ü‰t™½Èà¥¸‰…Ñ¡l‰½µÁ±•Ñ•‰ut°l‰ˆ‰t¤((€€€‘•˜Ñ•ÍÑ}•µ…¥±}É•Á½ÉÑ}ÁÉ•Á…É•Í}™É•Í¡}ÍÉ••¹Í¡½Ñ}İ¥Ñ¡½ÕÑ}É•‘•¹Ñ¥…±Ì¡Í•±˜¤è(€€€€€€€İ¥Ñ Ñ•µÁ™¥±”¹Q•µÁ½É…Éå¥É•Ñ½Éä ¤…ÌÑµÀè(€€€€€€€€€€€É½½Ğ€ôA…Ñ ¡ÑµÀ¤(€€€€€€€€€€€Í¡½Ğ€ôÉ½½Ğ€¼€‰Í¡½Ğ¹Á¹œˆ(€€€€€€€€€€€Í¡½Ğ¹İÉ¥Ñ•}‰åÑ•Ì¡ˆ‰Á¹œˆ¤(€€€€€€€€€€€½¹™¥œ€ôì‰•µ…¥±}É•Á½ÉĞˆèì(€€€€€€€€€€€€€€€€‰•¹…‰±•ˆèQÉÕ”°€‰É•¥Á¥•¹Ğˆè€‰Ñ•ÍÑ•á…µÁ±”¹½´ˆ°(€€€€€€€€€€€€€€€€‰ÍÉ••¹Í¡½ÑÌˆèì‰…µ”ˆèÍÑÈ¡Í¡½Ğ¥ô°(€€€€€€€€€€€€€€€€‰ÕÍ•É}•¹Øˆè€‰QMQ}M5QA}UMHˆ°€‰Á…ÍÍİ½É‘}•¹Øˆè€‰QMQ}M5QA}AMM]=Iˆ(€€€€€€€€€€€ô°€‰İ½É­™±½İÌˆèì‰…µ”ˆèì‰‘¥ÍÁ±…å}¹…µ”ˆè€‰…µ”‰õõô(€€€€€€€€€€€İ¥Ñ Á…Ñ ¹‘¥Ğ ‰½Ì¹•¹Ù¥É½¸ˆ°íô°±•…ÈõQÉÕ”¤è(€€€€€€€€€€€€€€€½¬°µ•ÍÍ…”€ôÍ•¹‘}‘…¥±å}ÍÉ••¹Í¡½ÑÌ (€€€€€€€€€€€€€€€€€€€É½½Ğ°½¹™¥œ°l‰…µ”‰t°mì‰İ½É­™±½Üˆè€‰…µ”ˆ°€‰ÍÑ…ÑÕÌˆè€‰ÍÕ•ÍÌ‰õt°€À¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ…±Í”¡½¬¤(€€€€€€€€€€€Í•±˜¹…ÍÍ•ÉÑ%¸ ‹–Âkšr«¢ºûö¸ˆ°µ•ÍÍ…”¤(()¥˜}}¹…µ•}|€ôô€‰}}µ…¥¹}|ˆèÕ¹¥ÑÑ•ÍĞ¹µ…¥¸ ¤(
+            log.write_text("", encoding="utf-8")
+            commands = []
+            ctx = RunContext(root, {"tools": {"ldconsole": "ldconsole.exe"}},
+                             lambda _: None, threading.Event())
+            def command(args, timeout, cwd=None, env=None):
+                commands.append(args)
+                return Result(True, "ready", {"output": ""})
+            ctx.command = command
+
+            def write_recovery():
+                time.sleep(0.1)
+                log.write_text("USB device emulator-5560 is offline\n", encoding="utf-8")
+                time.sleep(0.3)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("æ¨¡æ‹Ÿå™¨è¿æ¥æˆåŠŸ\nå¼€å§‹æ‰§è¡Œã€å·¥ä½œä»»åŠ¡ã€‘\n"
+                                 "æ‰§è¡Œå®Œæˆã€å·¥ä½œä»»åŠ¡ã€‘\nä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ\n")
+
+            threading.Thread(target=write_recovery, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "device": "emulator-5560", "emulator_instance": 3,
+                    "max_emulator_restarts": 1, "poll_seconds": 0.02,
+                    "emulator_restart_delay": 0, "completion_quiet_seconds": 0.05,
+                    "timeout": 3, "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners.run_adb", return_value=Result(True, "ready")):
+                result = run_baas_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertEqual(result.details["emulator_restarts"], 1)
+            self.assertIn(["ldconsole.exe", "quit", "--index", "3"], commands)
+            self.assertIn(["ldconsole.exe", "launch", "--index", "3"], commands)
+
+    def test_baas_retries_start_click_until_fresh_log_appears(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            clicks = 0
+
+            def click(*args):
+                nonlocal clicks
+                clicks += 1
+                if clicks == 2:
+                    log.write_text("æ¨¡æ‹Ÿå™¨è¿æ¥æˆåŠŸ\nå¼€å§‹æ‰§è¡Œã€å·¥ä½œä»»åŠ¡ã€‘\n"
+                                   "æ‰§è¡Œå®Œæˆã€å·¥ä½œä»»åŠ¡ã€‘\nä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ\n",
+                                   encoding="utf-8")
+                return True, "clicked"
+
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "gui_fallback_after": 0, "gui_fallback_retry_seconds": 0.05,
+                    "startup_timeout": 2, "max_start_clicks": 4, "poll_seconds": 0.02,
+                    "completion_quiet_seconds": 0.05, "timeout": 2,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_baas_start_button", side_effect=click):
+                result = run_baas_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertEqual(clicks, 2)
+
+    def test_maa_gui_follows_successor_after_launcher_exit(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = 0
+            def poll(self): return 0
+            def terminate(self): pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MAA.exe"; exe.write_bytes(b"")
+            debug = root / "debug"; debug.mkdir()
+            asst = debug / "asst.log"; asst.write_text("", encoding="utf-8")
+            gui = debug / "gui.log"; gui.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def update_and_finish():
+                time.sleep(0.1)
+                gui.write_text("Pending update package detected\n", encoding="utf-8")
+                time.sleep(0.1)
+                asst.write_text("AllTasksCompleted\n", encoding="utf-8")
+
+            threading.Thread(target=update_and_finish, daemon=True).start()
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._process_path_exists", return_value=True), \
+                    patch("gameflow.runners.subprocess.run"):
+                result = run_maa_gui({"executable": str(exe), "log_path": str(asst),
+                                      "gui_log_path": str(gui), "timeout": 3,
+                                      "restart_grace_seconds": 1}, ctx)
+            self.assertTrue(result.success)
+
+    def test_maa_gui_fails_after_fresh_log_stalls(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "MAA.exe"
+            exe.write_bytes(b"")
+            asst = root / "asst.log"
+            asst.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_once():
+                time.sleep(0.05)
+                asst.write_text("task started\n", encoding="utf-8")
+
+            threading.Thread(target=write_once, daemon=True).start()
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_maa_gui({
+                    "executable": str(exe),
+                    "log_path": str(asst),
+                    "log_stall_seconds": 0.05,
+                    "timeout": 4,
+                    "close_on_complete": False,
+                }, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("æ—¥å¿—å·²åœæ»", result.message)
+            self.assertTrue(result.details["retry_step"])
+
+    def test_naruto_completion_and_reward_visuals(self):
+        import cv2
+        import numpy as np
+
+        home_hsv = np.zeros((720, 1280, 3), dtype=np.uint8)
+        home_hsv[:, :, 2] = 60
+        home_hsv[0:101, 192:1088] = (108, 180, 100)
+        home_hsv[100:340, 250:900] = (108, 180, 100)
+        home = cv2.cvtColor(home_hsv, cv2.COLOR_HSV2BGR)
+        self.assertTrue(_naruto_visual_metrics(home)["home_page"])
+
+        battle_prep_hsv = home_hsv.copy()
+        battle_prep_hsv[0:101, 192:1088] = (150, 80, 150)
+        battle_prep = cv2.cvtColor(battle_prep_hsv, cv2.COLOR_HSV2BGR)
+        battle_metrics = _naruto_visual_metrics(battle_prep)
+        self.assertGreaterEqual(battle_metrics["home_blue_fraction"], 0.60)
+        self.assertFalse(battle_metrics["home_page"])
+
+        popup = np.full((720, 1280, 3), 30, dtype=np.uint8)
+        popup[120:600, 40:1240] = 255
+        self.assertTrue(_naruto_visual_metrics(popup)["completion_popup"])
+
+        portrait_dialog = np.full((1280, 720, 3), 30, dtype=np.uint8)
+        portrait_dialog[210:990, 45:675] = 255
+        portrait_metrics = _naruto_visual_metrics(portrait_dialog)
+        self.assertTrue(portrait_metrics["portrait_white_dialog"])
+        self.assertFalse(portrait_metrics["completion_popup"])
+
+        privacy_hsv = np.zeros((1280, 720, 3), dtype=np.uint8)
+        privacy_hsv[:, :, 2] = 30
+        privacy_hsv[210:1100, 20:700] = (0, 0, 240)
+        privacy_hsv[1152:1254, 374:684] = (15, 220, 240)
+        privacy = cv2.cvtColor(privacy_hsv, cv2.COLOR_HSV2BGR)
+        self.assertTrue(_naruto_visual_metrics(privacy)["game_privacy_consent"])
+
+        reward_hsv = np.zeros((720, 1280, 3), dtype=np.uint8)
+        reward_hsv[:, :, 2] = 70
+        reward_hsv[550:590, 420:1200] = (12, 220, 220)
+        for center_x in (510, 730, 1015, 1175):
+            reward_hsv[475:570, center_x - 55:center_x + 55] = (15, 180, 180)
+        reward = cv2.cvtColor(reward_hsv, cv2.COLOR_HSV2BGR)
+        metrics = _naruto_visual_metrics(reward)
+        self.assertTrue(metrics["reward_page"])
+        self.assertTrue(metrics["all_chests_claimed"])
+
+    def test_naruto_lobby_uses_fixed_entry_icons_not_background_color(self):
+        import cv2
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            reference = np.full((720, 1280, 3), (80, 35, 20), dtype=np.uint8)
+            candidate = np.full((720, 1280, 3), (20, 90, 150), dtype=np.uint8)
+            regions = ((.02, .83, .12, .99), (.11, .83, .21, .99),
+                       (.18, .83, .29, .99), (.28, .83, .39, .99))
+            for index, (x1, y1, x2, y2) in enumerate(regions):
+                for image in (reference, candidate):
+                    h, w = image.shape[:2]
+                    left, top = round(w * x1), round(h * y1)
+                    right, bottom = round(w * x2), round(h * y2)
+                    cv2.rectangle(image, (left + 8, top + 8),
+                                  (right - 8, bottom - 8), (255, 255, 255), 3)
+                    cv2.putText(image, str(index), (left + 25, bottom - 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 4)
+            reference_path = Path(tmp) / "lobby.png"
+            cv2.imwrite(str(reference_path), reference)
+
+            metrics = _naruto_lobby_icon_metrics(
+                candidate, [str(reference_path)], threshold=.5, min_matches=3)
+            self.assertTrue(metrics["home_page"])
+            self.assertGreaterEqual(metrics["lobby_icon_match_count"], 3)
+
+            false_page = np.full((720, 1280, 3), (120, 80, 20), dtype=np.uint8)
+            false_metrics = _naruto_lobby_icon_metrics(
+                false_page, [str(reference_path)], threshold=.5, min_matches=3)
+            self.assertFalse(false_metrics["home_page"])
+
+    def test_azur_lane_runner_waits_for_scheduler_idle(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Alas.exe"; exe.write_bytes(b"")
+            logs = root / "log"; logs.mkdir()
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            log = logs / "today_alas.txt"
+            log.write_text("", encoding="utf-8")
+
+            def write_log():
+                time.sleep(0.18)
+                log.write_text(
+                    "Scheduler: Start task `Reward`\nScheduler: End task `Reward`\nNo task pending",
+                    encoding="utf-8")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_alas.txt"),
+                    "timeout": 3, "completion_quiet_seconds": 0.05,
+                    "log_retry_interval": 0.05,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_alas_start_button",
+                          return_value=(True, "clicked")) as click:
+                result = run_alas_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertGreaterEqual(click.call_count, 1)
+
+    def test_azur_lane_idle_cleanup_logs_do_not_cancel_completion(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Alas.exe"; exe.write_bytes(b"")
+            logs = root / "log"; logs.mkdir()
+            log = logs / "today_alas.txt"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_log():
+                time.sleep(0.1)
+                log.write_text(
+                    "Scheduler: Start task `Main`\n"
+                    "Scheduler: End task `Main`\n"
+                    "No task pending\n",
+                    encoding="utf-8")
+                time.sleep(0.04)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        "[Task] Main (Enable, tomorrow)\n"
+                        "Wait until tomorrow for task `Main`\n"
+                        "Goto main page during wait\n")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_alas.txt"),
+                    "timeout": 2, "completion_quiet_seconds": 0.12,
+                    "log_retry_interval": 0.02,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_alas_start_button",
+                          return_value=(True, "clicked")):
+                result = run_alas_gui(step, ctx)
+            self.assertTrue(result.success, result.message)
+
+    def test_azur_lane_update_wait_is_once_and_does_not_consume_startup_timeout(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Alas.exe"; exe.write_bytes(b"")
+            logs = root / "log"; logs.mkdir(); log = logs / "today_alas.txt"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_log():
+                time.sleep(0.65)
+                log.write_text("Scheduler: Start task\nNo task pending", encoding="utf-8")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_alas.txt"),
+                    "startup_update_wait": 0.5, "startup_timeout": 0.4,
+                    "timeout": 2, "completion_quiet_seconds": 0.01,
+                    "log_retry_interval": 0.02, "clean_existing": False,
+                    "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_alas_start_button",
+                          return_value=(True, "clicked")):
+                result = run_alas_gui(step, ctx)
+            self.assertTrue(result.success, result.message)
+            self.assertNotIn("startup_update_wait", step)
+
+    def test_azur_lane_human_takeover_stops_without_repeated_clicks(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Alas.exe"; exe.write_bytes(b"")
+            logs = root / "log"; logs.mkdir(); log = logs / "today_alas.txt"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_error():
+                time.sleep(0.1)
+                log.write_text('No emulator with serial "127.0.0.1:16384" found\n'
+                               'Request human takeover\n', encoding="utf-8")
+
+            threading.Thread(target=write_error, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "*_alas.txt"),
+                    "timeout": 2, "log_retry_interval": 0.05,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_alas_start_button",
+                          return_value=(True, "clicked")) as click:
+                result = run_alas_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("No emulator with serial", result.message)
+            self.assertLessEqual(click.call_count, 2)
+
+    def test_azur_lane_start_clicks_are_capped(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Alas.exe"; exe.write_bytes(b"")
+            logs = root / "log"; logs.mkdir(); (logs / "today_alas.txt").write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            step = {"executable": str(exe), "log_glob": str(logs / "*_alas.txt"),
+                    "timeout": 2, "log_retry_interval": 0.05, "max_start_clicks": 3,
+                    "startup_timeout": 1, "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_alas_start_button",
+                          return_value=(True, "clicked")) as click:
+                result = run_alas_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertEqual(click.call_count, 3)
+            self.assertIn("3 æ¬¡", result.message)
+
+    def test_mumu_wait_accepts_already_started_instance(self):
+        class Done:
+            returncode = 0
+            stdout = b'{"index":"0","is_android_started":true,"is_process_started":true}'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); manager = root / "MuMuManager.exe"; manager.write_bytes(b"")
+            (root / "adb.exe").write_bytes(b"")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            calls = []
+            def command(args, timeout, cwd=None, env=None):
+                calls.append(args)
+                return Result(True, "ready", {"output": "1"})
+            ctx.command = command
+            with patch("gameflow.runners.subprocess.run", return_value=Done()):
+                result = run_mumu_wait({"executable": str(manager), "instance": 0,
+                                        "timeout": 1, "settle_seconds": 0}, ctx)
+            self.assertTrue(result.success)
+            self.assertTrue(result.details["adb_connected"])
+            self.assertTrue(result.details["boot_completed"])
+            self.assertTrue(any(call[1:3] == ["connect", "127.0.0.1:16384"] for call in calls))
+            self.assertFalse(any("MuMuManager.exe" in call[0] and "adb" in call for call in calls))
+
+    def test_gumballs_runner_clicks_and_completes_two_rounds(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MFAAvalonia.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir()
+            log = logs / "log-test.log"
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_rounds():
+                time.sleep(0.1)
+                log.write_text("ç”¨æˆ·æ“ä½œï¼šå¯åŠ¨ä»»åŠ¡\nä»»åŠ¡ï¼šWeeklyRaid è¯†åˆ«å¤±è´¥, è·³è¿‡è¯¥ä»»åŠ¡\n"
+                               "ä»»åŠ¡å·²å…¨éƒ¨å®Œæˆï¼\n", encoding="utf-8")
+                time.sleep(1.2)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("ç”¨æˆ·æ“ä½œï¼šå¯åŠ¨ä»»åŠ¡\nä»»åŠ¡å·²å…¨éƒ¨å®Œæˆï¼\n")
+
+            threading.Thread(target=write_rounds, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "log-*.log"),
+                    "initial_click_delay": 0, "between_round_delay": 0,
+                    "round_start_timeout": 3, "timeout": 5,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_gumballs_start_button",
+                          return_value=(True, "clicked")) as click:
+                result = run_gumballs_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertEqual(click.call_count, 2)
+            self.assertEqual(result.details["rounds"], 2)
+            self.assertEqual(result.details["skipped_tasks"], ["WeeklyRaid"])
+
+    def test_maaend_runner_waits_for_primary_daily_completion(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MaaEnd.exe"; exe.write_bytes(b"")
+            logs = root / "debug"; logs.mkdir()
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_log():
+                time.sleep(0.1)
+                (logs / "2026-07-13-1.log").write_text(
+                    "æ›´æ–°æ£€æŸ¥å®Œæˆ: æœ€æ–°ç‰ˆæœ¬=v2.19.0, æœ‰æ›´æ–°=false\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å¼€å§‹æ‰§è¡Œä»»åŠ¡, æ•°é‡: 5, åˆ†æ®µ: primary:4, trailing:1\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: æ”¶å°¾æ®µåˆ‡æ¢ä¸º Dummy Controller\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: ä»»åŠ¡å·²æäº¤, task_ids: [1,2,3,4,5]\n", encoding="utf-8")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "20??-??-??-*.log"),
+                    "timeout": 3, "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False, "bring_game_to_front": True,
+                    "game_process_image": "Endfield.exe", "game_title_contains": "Endfield",
+                    "game_foreground_timeout": 0.1,
+                    "screenshot_path": str(root / "endfield.png")}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._bring_game_window_to_front",
+                          return_value=Result(True, "foreground")) as foreground, \
+                    patch("gameflow.runners.run_window_screenshot",
+                          return_value=Result(True, "saved")) as screenshot:
+                result = run_maaend_gui(step, ctx)
+            self.assertTrue(result.success)
+            self.assertEqual(result.message, "ç»ˆæœ«åœ°æ¯æ—¥ä»»åŠ¡æ­£å¸¸ç»“æŸ")
+            self.assertEqual(result.details["submitted_total"], 5)
+            foreground.assert_called_once()
+            screenshot.assert_called_once()
+
+    def test_maaend_daily_error_becomes_abnormal_end(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MaaEnd.exe"; exe.write_bytes(b"")
+            logs = root / "debug"; logs.mkdir()
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_log():
+                time.sleep(0.05)
+                (logs / "2026-07-15-2.log").write_text(
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å¼€å§‹æ‰§è¡Œä»»åŠ¡, æ•°é‡: 5, åˆ†æ®µ: primary:4, trailing:1\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: ä»»åŠ¡æ‰§è¡Œå¤±è´¥\n", encoding="utf-8")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "20??-??-??-*.log"),
+                    "timeout": 2, "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_maaend_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("å¼‚å¸¸ç»“æŸ", result.message)
+
+    def test_maaend_framework_failure_cannot_be_reported_as_success(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MaaEnd.exe"; exe.write_bytes(b"")
+            logs = root / "debug"; logs.mkdir()
+            high = logs / "2026-07-18-1.log"; high.write_text("", encoding="utf-8")
+            framework = logs / "maafw.log"; framework.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_failure():
+                time.sleep(0.1)
+                high.write_text(
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å¼€å§‹æ‰§è¡Œä»»åŠ¡, æ•°é‡: 5, åˆ†æ®µ: primary:4, trailing:1\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: ä»»åŠ¡å·²æäº¤, task_ids: [1,2,3,4,5]\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: æ”¶å°¾æ®µåˆ‡æ¢ä¸º Dummy Controller\n", encoding="utf-8")
+                framework.write_text(
+                    '!!!OnEventNotify!!! [msg=Tasker.Task.Failed] '
+                    '[details={"entry":"DailyRewardStart","task_id":4}]\n', encoding="utf-8")
+
+            threading.Thread(target=write_failure, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "20??-??-??-*.log"),
+                    "framework_log_path": str(framework), "timeout": 3,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False, "game_process_image": "Endfield.exe",
+                    "screenshot_path": str(root / "endfield.png")}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners.run_window_screenshot",
+                          return_value=Result(True, "saved")):
+                result = run_maaend_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("DailyRewardStart", result.message)
+
+    def test_maaend_framework_failure_waits_for_remaining_primary_tasks(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MaaEnd.exe"; exe.write_bytes(b"")
+            logs = root / "debug"; logs.mkdir()
+            high = logs / "2026-07-20-1.log"; high.write_text("", encoding="utf-8")
+            framework = logs / "maafw.log"; framework.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            remaining_finished = threading.Event()
+
+            def write_failure_then_finish():
+                time.sleep(0.04)
+                high.write_text(
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å¼€å§‹æ‰§è¡Œä»»åŠ¡, æ•°é‡: 5, åˆ†æ®µ: primary:4, trailing:1\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å‰æ®µä»»åŠ¡å·²æäº¤, task_ids: [1,2,3,4]\n", encoding="utf-8")
+                framework.write_text(
+                    '!!!OnEventNotify!!! [msg=Tasker.Task.Succeeded] '
+                    '[details={"entry":"DijiangRewards","task_id":1}]\n'
+                    '!!!OnEventNotify!!! [msg=Tasker.Task.Succeeded] '
+                    '[details={"entry":"SellProductSchedule","task_id":2}]\n'
+                    '!!!OnEventNotify!!! [msg=Tasker.Task.Failed] '
+                    '[details={"entry":"CreditShoppingMain","task_id":3}]\n', encoding="utf-8")
+                time.sleep(0.12)
+                with framework.open("a", encoding="utf-8") as handle:
+                    handle.write('!!!OnEventNotify!!! [msg=Tasker.Task.Succeeded] '
+                                 '[details={"entry":"DailyRewardStart","task_id":4}]\n')
+                with high.open("a", encoding="utf-8") as handle:
+                    handle.write("å®ä¾‹ å…¨å¥—æ—¥å¸¸: æ”¶å°¾æ®µåˆ‡æ¢ä¸º Dummy Controller\n"
+                                 "å®ä¾‹ å…¨å¥—æ—¥å¸¸: ä»»åŠ¡å·²æäº¤, task_ids: [1,2,3,4,5]\n")
+                remaining_finished.set()
+
+            threading.Thread(target=write_failure_then_finish, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "20??-??-??-*.log"),
+                    "framework_log_path": str(framework), "timeout": 2,
+                    "poll_interval": 0.01, "failed_settle_seconds": 0.3,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_maaend_gui(step, ctx)
+            self.assertTrue(remaining_finished.is_set())
+            self.assertFalse(result.success)
+            self.assertIn("CreditShoppingMain", result.message)
+            self.assertEqual(result.details["terminal_primary"], [1, 2, 3, 4])
+
+    def test_maaend_recovers_stalled_credit_shop_menu_with_direct_game_click(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "MaaEnd.exe"; exe.write_bytes(b"")
+            logs = root / "debug"; logs.mkdir()
+            high = logs / "2026-07-20-2.log"; high.write_text("", encoding="utf-8")
+            framework = logs / "maafw.log"; framework.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_stall_then_success():
+                time.sleep(0.03)
+                high.write_text(
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å¼€å§‹æ‰§è¡Œä»»åŠ¡, æ•°é‡: 4, åˆ†æ®µ: primary:4, trailing:0\n"
+                    "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å‰æ®µä»»åŠ¡å·²æäº¤, task_ids: [1,2,3,4]\n", encoding="utf-8")
+                framework.write_text(
+                    '!!!OnEventNotify!!! [msg=Node.PipelineNode.Starting] '
+                    '[details={"name":"__ScenePrivateWorldEnterMenuList","task_id":3}]\n',
+                    encoding="utf-8")
+                time.sleep(0.12)
+                with framework.open("a", encoding="utf-8") as handle:
+                    for task_id, entry in enumerate(("DijiangRewards", "SellProductSchedule",
+                                                     "CreditShoppingMain", "DailyRewardStart"), 1):
+                        handle.write('!!!OnEventNotify!!! [msg=Tasker.Task.Succeeded] '
+                                     f'[details={{"entry":"{entry}","task_id":{task_id}}}]\n')
+                with high.open("a", encoding="utf-8") as handle:
+                    handle.write("å®ä¾‹ å…¨å¥—æ—¥å¸¸: æ”¶å°¾æ®µåˆ‡æ¢ä¸º Dummy Controller\n"
+                                 "å®ä¾‹ å…¨å¥—æ—¥å¸¸: ä»»åŠ¡å·²æäº¤, task_ids: [1,2,3,4]\n")
+
+            threading.Thread(target=write_stall_then_success, daemon=True).start()
+            step = {"executable": str(exe), "log_glob": str(logs / "20??-??-??-*.log"),
+                    "framework_log_path": str(framework), "timeout": 2,
+                    "poll_interval": 0.01, "credit_menu_recovery_after": 0.02,
+                    "credit_menu_recovery_interval": 0.02, "credit_menu_recovery_max": 1,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False, "game_process_image": "Endfield.exe",
+                    "game_title_contains": "Endfield"}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_game_client_ratio",
+                          return_value=(True, "clicked")) as click:
+                result = run_maaend_gui(step, ctx)
+            self.assertTrue(result.success)
+            click.assert_called_once_with("Endfield.exe", "Endfield", 0.970, 0.056)
+
+    def test_log_gui_daily_retries_click_and_captures_reward(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Launcher.exe"; exe.write_bytes(b"")
+            log = root / "daily.log"; log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_log():
+                time.sleep(0.3)
+                log.write_text("RUN START\nREWARD PAGE\nALL DONE\n", encoding="utf-8")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"display_name": "æµ‹è¯•æ¯æ—¥", "executable": str(exe),
+                    "log_glob": str(log), "process_images": ["Launcher.exe"],
+                    "button_names": ["å®Œæ•´è¿è¡Œ"], "title_hints": ["Test"],
+                    "log_retry_interval": 0.05, "start_markers": ["RUN START"],
+                    "completion_markers": ["ALL DONE"],
+                    "screenshot_markers": ["REWARD PAGE"],
+                    "screenshot_path": str(root / "reward.png"),
+                    "bring_game_to_front": True, "game_process_image": "Game.exe",
+                    "completion_quiet_seconds": 0.05,
+                    "cleanup_process_images": [],
+                    "timeout": 2, "clean_existing": False, "close_on_complete": True}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_named_gui_button",
+                          return_value=(True, "clicked")) as click, \
+                    patch("gameflow.runners._bring_game_window_to_front",
+                          return_value=Result(True, "foreground")) as foreground, \
+                    patch("gameflow.runners.run_window_screenshot",
+                          return_value=Result(True, "saved")) as screenshot, \
+                    patch("gameflow.runners._close_matching_script_gui",
+                          return_value=(1, "closed")) as close_gui:
+                result = run_log_gui_daily(step, ctx)
+            self.assertTrue(result.success)
+            self.assertGreaterEqual(click.call_count, 2)
+            foreground.assert_called_once()
+            screenshot.assert_called_once()
+            close_gui.assert_called_once_with(FakeProcess.pid, ["Launcher.exe"], ["Test"])
+
+    def test_log_gui_daily_caps_start_button_clicks(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            step = {
+                "display_name": "æ˜Ÿç©¹é“é“å®Œæ•´è¿è¡Œ",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "initial_click_delay": 0,
+                "log_retry_interval": 0.01,
+                "max_start_clicks": 3,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_named_gui_button",
+                          return_value=(True, "clicked")) as click:
+                result = run_log_gui_daily(step, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("3 æ¬¡å¯åŠ¨ç‚¹å‡»ä¸Šé™", result.message)
+            self.assertEqual(result.details["start_clicks"], 3)
+            self.assertEqual(click.call_count, 3)
+
+    def test_log_gui_daily_reports_update_without_retryable_failure(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_update():
+                time.sleep(0.05)
+                log.write_text("GitHub å‘ç°æ–°ç‰ˆæœ¬: v2026.7.26\n", encoding="utf-8")
+
+            threading.Thread(target=write_update, daemon=True).start()
+            step = {
+                "display_name": "æ˜Ÿç©¹é“é“å®Œæ•´è¿è¡Œ",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "update_markers": ["GitHub å‘ç°æ–°ç‰ˆæœ¬"],
+                "initial_click_delay": 10,
+                "log_retry_interval": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_log_gui_daily(step, ctx)
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "needs_update")
+            self.assertIn("éœ€è¦æ›´æ–°", result.message)
+
+    def test_log_gui_daily_waits_for_detached_gui_after_launcher_exits(self):
+        class ExitedLauncher:
+            pid = 123456789
+            returncode = 0
+            def poll(self): return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Launcher.exe"; exe.write_bytes(b"")
+            log = root / "daily.log"; log.write_text("", encoding="utf-8")
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
+
+            def write_log():
+                time.sleep(0.2)
+                log.write_text("RUN START\nALL DONE\n", encoding="utf-8")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"display_name": "ç»åŒºé›¶ä¸€æ¡é¾™", "executable": str(exe),
+                    "log_glob": str(log), "process_images": ["Launcher.exe"],
+                    "button_names": ["å¯åŠ¨ä¸€æ¡é¾™"], "title_hints": ["ç»åŒºé›¶ ä¸€æ¡é¾™"],
+                    "initial_click_delay": 0, "log_retry_interval": 0.05,
+                    "gui_ready_timeout": 1, "start_markers": ["RUN START"],
+                    "completion_markers": ["ALL DONE"], "completion_quiet_seconds": 0.05,
+                    "timeout": 2, "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=ExitedLauncher()), patch(
+                    "gameflow.runners._click_named_gui_button",
+                    return_value=(False, "GUI loading")), patch(
+                    "gameflow.runners._process_image_exists", return_value=False), patch(
+                    "gameflow.runners._matching_visible_window_exists", return_value=False):
+                result = run_log_gui_daily(step, ctx)
+
+            self.assertTrue(result.success)
+            self.assertTrue(any("çœŸæ­£ GUI ä¼šç”±ç‹¬ç«‹è¿›ç¨‹å»¶è¿Ÿåˆ›å»º" in item
+                                for item in messages))
+
+    def test_log_gui_daily_stops_querying_detached_gui_after_log_start(self):
+        class ExitedLauncher:
+            pid = 123456789
+            returncode = 0
+            def poll(self): return 0
+            def terminate(self): pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Launcher.exe"; exe.write_bytes(b"")
+            log = root / "daily.log"; log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def write_log():
+                time.sleep(0.03)
+                log.write_text(
+                    "RUN START\n"
+                    "æŒ‡ä»¤[ ä¸€æ¡é¾™ ] èŠ‚ç‚¹ è¿è¡Œ -> ç»“æŸ è¿”å›çŠ¶æ€ è¿›è¡Œä¸­\n",
+                    encoding="utf-8")
+                time.sleep(0.15)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("ALL DONE\n")
+
+            threading.Thread(target=write_log, daemon=True).start()
+            step = {"display_name": "ç»åŒºé›¶ä¸€æ¡é¾™", "executable": str(exe),
+                    "log_glob": str(log), "process_images": ["Launcher.exe"],
+                    "title_hints": ["ç»åŒºé›¶ ä¸€æ¡é¾™"], "start_markers": ["RUN START"],
+                    "completion_markers": ["ALL DONE"], "completion_quiet_seconds": 0.01,
+                    "log_retry_interval": 0.01, "initial_click_delay": 10,
+                    "timeout": 2, "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=ExitedLauncher()), \
+                    patch("gameflow.runners._matching_visible_window_exists",
+                          return_value=True) as window_probe:
+                result = run_log_gui_daily(step, ctx)
+            self.assertTrue(result.success)
+            self.assertLessEqual(window_probe.call_count, 5)
+
+    def test_log_gui_daily_stalled_state_fails_with_current_screenshot(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            wrote = False
+            def poll(self):
+                if not self.wrote:
+                    self.wrote = True
+                    log.write_text(
+                        "RUN START\næŒ‡ä»¤[ å‡ºæˆ˜ ] èŠ‚ç‚¹ æ£€æµ‹æ¸¸æˆçª—å£ -> å‡ºæˆ˜ è¿”å›çŠ¶æ€ æŒ‰é’®-å‡ºæˆ˜\n",
+                        encoding="utf-8")
+                return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "Launcher.exe"; exe.write_bytes(b"")
+            log = root / "daily.log"; log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            step = {"display_name": "æµ‹è¯•æ¯æ—¥", "executable": str(exe),
+                    "log_glob": str(log), "process_images": ["Launcher.exe"],
+                    "start_markers": ["RUN START"], "log_retry_interval": 0.01,
+                    "state_watchdog_regex": r"æŒ‡ä»¤\[\s*([^\]]+)\s*\]\s*èŠ‚ç‚¹\s*(.*?)\s*->.*?è¿”å›çŠ¶æ€\s*(.*)$",
+                    "state_stall_seconds": 0.08, "state_recovery_seconds": 0.05,
+                    "targeted_state_recovery_regex": r"^å‡ºæˆ˜ \| æ£€æµ‹æ¸¸æˆçª—å£ \| æŒ‰é’®-å‡ºæˆ˜$",
+                    "targeted_state_recovery_after": 0.02,
+                    "targeted_state_recovery_interval": 0.02,
+                    "targeted_state_recovery_max": 1,
+                    "targeted_state_recovery_clicks": [[0.48, 0.14, 0],
+                                                       [0.906, 0.957, 0]],
+                    "game_process_image": "Game.exe", "screenshot_path": str(root / "failure.png"),
+                    "initial_click_delay": 10,
+                    "timeout": 3, "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._bring_game_window_to_front",
+                          return_value=Result(True, "foreground")), \
+                    patch("gameflow.runners._click_game_client_ratio",
+                          return_value=(True, "clicked")) as targeted_click, \
+                    patch("gameflow.runners.run_window_screenshot",
+                          return_value=Result(True, "saved")) as screenshot:
+                result = run_log_gui_daily(step, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("æŒ‰é’®-å‡ºæˆ˜", result.message)
+            self.assertEqual(targeted_click.call_args_list, [
+                call("Game.exe", "", 0.48, 0.14),
+                call("Game.exe", "", 0.906, 0.957),
+            ])
+            screenshot.assert_called()
+
+    def test_exclusive_daily_group_never_runs_together(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); store = Store(root / "db.sqlite")
+            config = {"workflows": {
+                "endfield": {"exclusive_group": "pc_group", "steps": [
+                    {"id": "endfield", "runner": "record"}]},
+                "zenless": {"exclusive_group": "pc_group", "steps": [
+                    {"id": "zenless", "runner": "record"}]},
+                "starrail": {"exclusive_group": "pc_group", "steps": [
+                    {"id": "starrail", "runner": "record"}]},
+            }}
+            intervals = {}
+
+            def record(step, ctx):
+                intervals[step["id"]] = [time.monotonic(), None]
+                time.sleep(0.08)
+                intervals[step["id"]][1] = time.monotonic()
+                return Result(True, "done")
+
+            with patch.dict(RUNNERS, {"record": record}):
+                manager = WorkflowManager(root, config, store)
+                ok, _ = manager.start_daily(["endfield", "zenless", "starrail"], 2)
+                self.assertTrue(ok)
+                manager.join(3)
+            ordered = sorted(intervals.values(), key=lambda item: item[0])
+            self.assertEqual(len(ordered), 3)
+            self.assertTrue(all(ordered[index][1] <= ordered[index + 1][0]
+                                for index in range(2)))
+
+    def test_manual_start_respects_exclusive_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "endfield": {"exclusive_group": "pc_group", "steps": [
+                    {"id": "wait", "runner": "delay", "seconds": 0.3}]},
+                "zenless": {"exclusive_group": "pc_group", "steps": [
+                    {"id": "wait", "runner": "delay", "seconds": 0.01}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start("endfield")[0])
+            ok, message = manager.start("zenless")
+            self.assertFalse(ok)
+            self.assertIn("ä¸èƒ½åŒæ—¶æ‰§è¡Œ", message)
+            manager.stop(); manager.join(2)
+
+    def test_explicit_exclusive_with_is_symmetric(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "alas": {"exclusive_with": ["naruto"], "steps": [
+                    {"id": "wait", "runner": "delay", "seconds": 0.3}]},
+                "naruto": {"steps": [
+                    {"id": "wait", "runner": "delay", "seconds": 0.01}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start("naruto")[0])
+            ok, message = manager.start("alas")
+            self.assertFalse(ok)
+            self.assertIn("ä¸èƒ½åŒæ—¶æ‰§è¡Œ", message)
+            manager.stop(); manager.join(2)
+
+    def test_daily_batch_parallel_and_serial(self):
+        def run_batch(parallel):
+            tmp = tempfile.TemporaryDirectory()
+            root = Path(tmp.name)
+            config = {"workflows": {
+                "a": {"steps": [{"id": "a", "runner": "delay", "seconds": 0.35}]},
+                "b": {"steps": [{"id": "b", "runner": "delay", "seconds": 0.35}]}
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            started = time.monotonic()
+            ok, _ = manager.start_daily(["a", "b"], parallel)
+            self.assertTrue(ok)
+            manager.join(5)
+            elapsed = time.monotonic() - started
+            completed = manager.state()["batch"]["completed"]
+            tmp.cleanup()
+            return elapsed, completed
+
+        serial_time, serial_done = run_batch(1)
+        parallel_time, parallel_done = run_batch(2)
+        self.assertGreater(serial_time, 0.6)
+        self.assertLess(parallel_time, serial_time * 0.8)
+        self.assertEqual([x["workflow"] for x in serial_done], ["a", "b"])
+        self.assertTrue(all(x["status"] == "success" for x in parallel_done))
+
+    def test_daily_batch_selection_and_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "a": {"steps": [{"id": "a", "runner": "delay", "seconds": 0.05}]},
+                "b": {"steps": [{"id": "b", "runner": "delay", "seconds": 0.05}]},
+                "self_test": {"steps": [{"id": "x", "runner": "delay", "seconds": 0.05}]}
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            ok, _ = manager.start_daily(["b", "self_test"], 9)
+            self.assertTrue(ok)
+            manager.join(5)
+            batch = manager.state()["batch"]
+            self.assertEqual(batch["max_parallel"], 1)
+            self.assertEqual([x["workflow"] for x in batch["completed"]], ["b"])
+
+    def test_cancel_standalone_stops_only_requested_engine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "a": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.5}]},
+                "b": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.15}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start("a")[0])
+            self.assertTrue(manager.start("b")[0])
+            ok, _ = manager.cancel("a")
+            self.assertTrue(ok)
+            manager.join(2)
+            states = manager.workflow_states()
+            self.assertEqual(states["a"].get("last_status"), "cancelled")
+            self.assertEqual(states["b"].get("last_status"), "success")
+
+    def test_cancel_pending_batch_item_removes_and_records_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "a": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.2}]},
+                "b": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.2}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start_daily(["a", "b"], 1)[0])
+            deadline = time.monotonic() + 2
+            while "b" not in manager.state()["batch"]["queue"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            ok, _ = manager.cancel("b")
+            self.assertTrue(ok)
+            snapshot = manager.state()["batch"]
+            self.assertNotIn("b", snapshot["queue"])
+            self.assertTrue(any(item["workflow"] == "b" and item["status"] == "cancelled"
+                                for item in snapshot["completed"]))
+            manager.join(3)
+            completed = manager.state()["batch"]["completed"]
+            self.assertEqual(sum(item["workflow"] == "b" for item in completed), 1)
+            self.assertEqual(next(item["status"] for item in completed
+                                  if item["workflow"] == "b"), "cancelled")
+            self.assertEqual(next(item["status"] for item in completed
+                                  if item["workflow"] == "a"), "success")
+
+    def test_cancel_active_batch_item_keeps_other_engine_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "a": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.5}]},
+                "b": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.15}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start_daily(["a", "b"], 2)[0])
+            deadline = time.monotonic() + 2
+            while "a" not in manager.state()["batch"]["active"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(manager.cancel("a")[0])
+            manager.join(3)
+            completed = {item["workflow"]: item["status"]
+                         for item in manager.state()["batch"]["completed"]}
+            self.assertEqual(completed["a"], "cancelled")
+            self.assertEqual(completed["b"], "success")
+
+    def test_cancel_api_cancels_named_workflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = {"workflows": {
+                "a": {"steps": [{"id": "wait", "runner": "delay", "seconds": 0.5}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start("a")[0])
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(manager))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                connection.request("POST", "/api/cancel?workflow=a")
+                response = connection.getresponse()
+                payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(response.status, 200)
+                self.assertTrue(payload["ok"])
+                connection.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+            manager.join(2)
+            self.assertEqual(manager.workflow_states()["a"].get("last_status"), "cancelled")
+
+    def test_email_report_prepares_fresh_screenshot_without_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shot = root / "shot.png"
+            shot.write_bytes(b"png")
+            config = {"email_report": {
+                "enabled": True, "recipient": "test@example.com",
+                "screenshots": {"game": str(shot)},
+                "user_env": "TEST_SMTP_USER", "password_env": "TEST_SMTP_PASSWORD"
+            }, "workflows": {"game": {"display_name": "Game"}}}
+            with patch.dict("os.environ", {}, clear=True):
+                ok, message = send_daily_screenshots(
+                    root, config, ["game"], [{"workflow": "game", "status": "success"}], 0)
+            self.assertFalse(ok)
+            self.assertIn("å°šæœªè®¾ç½®", message)
+
+
+if __name__ == "__main__": unittest.main()
