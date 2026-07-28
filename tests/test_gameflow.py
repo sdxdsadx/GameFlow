@@ -997,11 +997,16 @@ class GameFlowTests(unittest.TestCase):
             debug = root / "debug"; debug.mkdir()
             asst = debug / "asst.log"; asst.write_text("", encoding="utf-8")
             gui = debug / "gui.log"; gui.write_text("", encoding="utf-8")
-            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
 
             def update_and_finish():
                 time.sleep(0.1)
-                gui.write_text("Pending update package detected\n", encoding="utf-8")
+                gui.write_text(
+                    "Pending update package detected\n"
+                    "开始任务: 基建换班\n"
+                    "当前选择的推理加速 GPU 存在兼容性问题\n",
+                    encoding="utf-8")
                 time.sleep(0.1)
                 asst.write_text("AllTasksCompleted\n", encoding="utf-8")
 
@@ -1013,6 +1018,9 @@ class GameFlowTests(unittest.TestCase):
                                       "gui_log_path": str(gui), "timeout": 3,
                                       "restart_grace_seconds": 1}, ctx)
             self.assertTrue(result.success)
+            self.assertIn("MAA 开始任务：基建换班", messages)
+            self.assertTrue(any("GPU 存在兼容性问题" in message
+                                for message in messages))
 
     def test_maa_gui_fails_after_fresh_log_stalls(self):
         class FakeProcess:
