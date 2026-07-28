@@ -446,6 +446,7 @@ class GameFlowTests(unittest.TestCase):
         self.assertIn("drop-before", PAGE)
         self.assertIn("按住拖拽调整顺序", PAGE)
         self.assertNotIn("枫原万叶", PAGE)
+        self.assertLess(PAGE.index('id="startDaily"'), PAGE.index('<section class="hero">'))
 
     def test_windows_command_output_decoding(self):
         message = "成功: 已终止进程。"
@@ -525,6 +526,10 @@ class GameFlowTests(unittest.TestCase):
         star_rail = config["workflows"]["star_rail_daily"]["steps"][0]
         self.assertEqual(star_rail["max_start_clicks"], 20)
         self.assertIn("GitHub 发现新版本", star_rail["update_markers"])
+        self.assertTrue(star_rail["dismiss_update_notice"])
+        self.assertEqual(star_rail["update_ack_button_names"], ["好的"])
+        self.assertAlmostEqual(star_rail["update_ack_x_ratio"], 0.366)
+        self.assertAlmostEqual(star_rail["update_ack_y_ratio"], 0.912)
         watched = (("daily_game", 2), ("blue_archive_daily", 2),
                    ("azur_lane_daily", 1), ("naruto_daily", 2),
                    ("gumballs_daily", 2))
@@ -1658,6 +1663,65 @@ class GameFlowTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(result.status, "needs_update")
             self.assertIn("需要更新", result.message)
+
+    def test_log_gui_daily_acknowledges_update_then_starts(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            calls = []
+
+            def write_update():
+                time.sleep(0.03)
+                log.write_text("GitHub 发现新版本: v2026.7.26\n", encoding="utf-8")
+
+            def click(root_pid, process_images, title_hints, names, x_ratio, y_ratio):
+                calls.append((list(names), x_ratio, y_ratio))
+                if names == ["完整运行"]:
+                    with log.open("a", encoding="utf-8") as handle:
+                        handle.write("开始运行\n每日实训已完成\n")
+                return True, "clicked"
+
+            threading.Thread(target=write_update, daemon=True).start()
+            step = {
+                "display_name": "星穹铁道完整运行",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "button_names": ["完整运行"],
+                "update_markers": ["GitHub 发现新版本"],
+                "dismiss_update_notice": True,
+                "update_ack_button_names": ["好的"],
+                "update_ack_x_ratio": 0.366,
+                "update_ack_y_ratio": 0.912,
+                "update_ack_settle_seconds": 0.01,
+                "update_ack_retry_interval": 0.2,
+                "initial_click_delay": 0.2,
+                "log_retry_interval": 0.01,
+                "start_markers": ["开始运行"],
+                "completion_markers": ["每日实训已完成"],
+                "completion_quiet_seconds": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_named_gui_button",
+                          side_effect=click):
+                result = run_log_gui_daily(step, ctx)
+            self.assertTrue(result.success, result.message)
+            self.assertEqual(calls[0], (["好的"], 0.366, 0.912))
+            self.assertEqual(calls[1][0], ["完整运行"])
+            self.assertEqual(result.details["update_ack_clicks"], 1)
 
     def test_log_gui_daily_waits_for_detached_gui_after_launcher_exits(self):
         class ExitedLauncher:
