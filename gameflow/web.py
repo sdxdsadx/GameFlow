@@ -1,10 +1,78 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
 
 from .engine import WorkflowManager
+
+
+class UiPreferences:
+    """Persist web-panel task participation independently from workflow config."""
+
+    def __init__(self, path: Path, workflow_ids: list[str]):
+        self.path = path
+        self.workflow_ids = [item for item in workflow_ids if item != "self_test"]
+        self._lock = threading.Lock()
+        self._value = self._load()
+
+    def _defaults(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "order": list(self.workflow_ids),
+            "max_parallel": 1,
+            "workflows": {item: {"enabled": True} for item in self.workflow_ids},
+        }
+
+    def _normalise(self, value: Any) -> dict[str, Any]:
+        defaults = self._defaults()
+        if not isinstance(value, dict):
+            return defaults
+        saved_order = value.get("order", [])
+        if not isinstance(saved_order, list):
+            saved_order = []
+        order = [item for item in saved_order
+                 if item in self.workflow_ids and saved_order.count(item) == 1]
+        order.extend(item for item in self.workflow_ids if item not in order)
+        raw_workflows = value.get("workflows", {})
+        if not isinstance(raw_workflows, dict):
+            raw_workflows = {}
+        workflows = {}
+        for item in self.workflow_ids:
+            raw_item = raw_workflows.get(item, {})
+            enabled = raw_item.get("enabled", True) if isinstance(raw_item, dict) else True
+            workflows[item] = {"enabled": bool(enabled)}
+        try:
+            max_parallel = max(1, min(int(value.get("max_parallel", 1)), 2))
+        except (TypeError, ValueError):
+            max_parallel = 1
+        return {"version": 1, "order": order, "max_parallel": max_parallel,
+                "workflows": workflows}
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            return self._normalise(json.loads(self.path.read_text(encoding="utf-8")))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return self._defaults()
+
+    def get(self) -> dict[str, Any]:
+        with self._lock:
+            # Return a detached JSON-compatible value so request threads cannot mutate it.
+            return json.loads(json.dumps(self._value, ensure_ascii=False))
+
+    def update(self, value: Any) -> dict[str, Any]:
+        with self._lock:
+            self._value = self._normalise(value)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+            temporary.write_text(json.dumps(self._value, ensure_ascii=False, indent=2) + "\n",
+                                 encoding="utf-8")
+            os.replace(temporary, self.path)
+            return json.loads(json.dumps(self._value, ensure_ascii=False))
 
 
 PAGE = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -22,12 +90,13 @@ button,select{font:inherit}button{position:relative;border:0;color:#fff;border-r
 .companion-wrap{position:relative;display:flex;align-items:center;justify-content:center}.speech{position:absolute;right:178px;top:15px;width:125px;padding:9px 11px;background:rgba(255,255,255,.95);color:#4c4269;border-radius:13px 13px 2px 13px;font-size:12px;box-shadow:0 8px 22px rgba(0,0,0,.16);z-index:3}.gacha-card{width:158px;height:174px;padding:0;border:1px solid rgba(255,215,106,.55);border-radius:25px;background:radial-gradient(circle at 50% 38%,rgba(255,230,151,.35),transparent 38%),linear-gradient(145deg,rgba(92,73,195,.65),rgba(39,31,103,.82));box-shadow:0 0 35px rgba(255,198,75,.22),inset 0 0 24px rgba(255,255,255,.08);overflow:hidden;animation:float 4s ease-in-out infinite}.gacha-card:hover{transform:translateY(-5px) scale(1.025);filter:brightness(1.08)}.gacha-card:before{content:"";position:absolute;inset:7px;border:1px solid rgba(255,235,174,.3);border-radius:19px;pointer-events:none}.gacha-avatar{position:absolute;width:146px;height:146px;left:6px;top:3px;object-fit:contain;filter:drop-shadow(0 8px 12px rgba(0,0,0,.35));transition:.35s opacity,.35s transform}.gacha-avatar.anime-avatar{width:142px;height:146px;left:8px;object-fit:cover;object-position:center 18%;border-radius:19px 19px 10px 10px}.gacha-card:hover .gacha-avatar{transform:scale(1.04)}.gacha-info{position:absolute;left:8px;right:8px;bottom:8px;padding:20px 7px 7px;border-radius:0 0 15px 15px;background:linear-gradient(transparent,rgba(11,9,40,.95) 42%);text-align:center}.gacha-stars{color:#ffdf73;font-size:10px;letter-spacing:1px;text-shadow:0 0 9px #ffb84f}.gacha-name{display:block;color:#fff;font-weight:700;font-size:14px;margin-top:1px}.gacha-hint,.gacha-pool{position:absolute;top:8px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 6px;border-radius:99px;background:rgba(8,7,31,.72);color:#ffe89a;font:9px "Microsoft YaHei",sans-serif;letter-spacing:.5px;z-index:2}.gacha-hint{right:8px}.gacha-pool{left:8px;color:#80eaff;font-family:Consolas,monospace}.summon-flash{animation:summon .55s ease}@keyframes summon{0%{opacity:.2;transform:scale(.72) rotate(-5deg)}55%{filter:brightness(1.8) drop-shadow(0 0 24px #fff)}100%{opacity:1;transform:none}}
 .layout{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(330px,.75fr);gap:18px;margin-top:18px}.stack{display:flex;flex-direction:column;gap:18px}.card{position:relative;border:1px solid var(--line);border-radius:var(--radius);padding:20px;background:var(--panel);box-shadow:var(--shadow);backdrop-filter:blur(18px);animation:enter .45s ease both}.card-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:15px}.card-title h3{font-size:17px;margin:0}.section-code{font:10px Consolas;color:var(--muted);letter-spacing:2px}.muted{color:var(--muted)}.small{font-size:12px}
 .progress-shell{margin-top:17px}.progress-meta{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-bottom:7px}.progress-track{height:8px;border-radius:99px;background:rgba(100,108,177,.18);overflow:hidden}.progress-fill{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--cyan),var(--violet),var(--pink));box-shadow:0 0 18px var(--violet);transition:width .5s ease}
-#tasks{display:flex;flex-direction:column;gap:9px}.task{--accent:#8d7cff;display:grid;grid-template-columns:20px 28px 48px minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:12px;border:1px solid rgba(141,124,255,.13);border-radius:16px;background:rgba(8,10,31,.35);transition:.2s border-color,.2s transform,.2s background,.2s opacity;cursor:grab}.day .task{background:rgba(255,255,255,.48)}.task:hover{transform:translateX(3px);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 8%,transparent)}.task.is-running{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent),0 0 24px color-mix(in srgb,var(--accent) 18%,transparent)}.task.dragging{opacity:.32;transform:scale(.985)}.task.drop-before{box-shadow:0 -3px 0 var(--cyan),0 -8px 22px rgba(85,220,255,.22)}.task.drop-after{box-shadow:0 3px 0 var(--pink),0 8px 22px rgba(255,102,183,.2)}.drag-handle{color:rgba(170,180,235,.58);font:bold 17px/1 monospace;letter-spacing:-4px;cursor:grab;user-select:none;text-align:center}.drag-handle:active,.task:active{cursor:grabbing}.select-box{appearance:none;width:20px;height:20px;border-radius:7px;border:2px solid rgba(160,169,229,.45);display:grid;place-items:center;cursor:pointer}.select-box:checked{background:linear-gradient(135deg,var(--violet),var(--pink));border-color:transparent}.select-box:checked:after{content:"✓";font:bold 13px sans-serif;color:white}.task-icon{width:45px;height:45px;display:grid;place-items:center;border-radius:14px;color:#fff;font-size:20px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 75%,#fff),var(--accent));box-shadow:0 7px 20px color-mix(in srgb,var(--accent) 24%,transparent)}.task-name{font-weight:700}.task-sub{display:block;color:var(--muted);font-size:12px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill{display:inline-flex;align-items:center;gap:5px;margin-left:7px;padding:3px 8px;border-radius:99px;background:rgba(140,148,201,.14);color:var(--muted);font-size:10px}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.running{color:var(--cyan);background:rgba(85,220,255,.12)}.pill.success{color:var(--green)}.pill.failed,.pill.interrupted{color:var(--red)}.task-actions{display:flex;gap:4px}.task-actions button{width:30px;height:30px;padding:0;border-radius:9px}.single button{white-space:nowrap;font-size:12px;padding:8px 10px}
+#tasks{display:flex;flex-direction:column;gap:9px}.task{--accent:#8d7cff;display:grid;grid-template-columns:20px 28px 48px minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:12px;border:1px solid rgba(141,124,255,.13);border-radius:16px;background:rgba(8,10,31,.35);transition:.2s border-color,.2s transform,.2s background,.2s opacity;cursor:grab}.day .task{background:rgba(255,255,255,.48)}.task:hover{transform:translateX(3px);border-color:color-mix(in srgb,var(--accent) 55%,transparent);background:color-mix(in srgb,var(--accent) 8%,transparent)}.task.is-running{border-color:var(--accent);box-shadow:inset 3px 0 var(--accent),0 0 24px color-mix(in srgb,var(--accent) 18%,transparent)}.task.is-disabled{opacity:.62}.task.is-disabled .task-icon{filter:grayscale(.8)}.task.dragging{opacity:.32;transform:scale(.985)}.task.drop-before{box-shadow:0 -3px 0 var(--cyan),0 -8px 22px rgba(85,220,255,.22)}.task.drop-after{box-shadow:0 3px 0 var(--pink),0 8px 22px rgba(255,102,183,.2)}.drag-handle{color:rgba(170,180,235,.58);font:bold 17px/1 monospace;letter-spacing:-4px;cursor:grab;user-select:none;text-align:center}.drag-handle:active,.task:active{cursor:grabbing}.select-box{appearance:none;width:20px;height:20px;border-radius:7px;border:2px solid rgba(160,169,229,.45);display:grid;place-items:center;cursor:pointer}.select-box:checked{background:linear-gradient(135deg,var(--violet),var(--pink));border-color:transparent}.select-box:checked:after{content:"✓";font:bold 13px sans-serif;color:white}.task-icon{width:45px;height:45px;display:grid;place-items:center;border-radius:14px;color:#fff;font-size:20px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 75%,#fff),var(--accent));box-shadow:0 7px 20px color-mix(in srgb,var(--accent) 24%,transparent)}.task-name{font-weight:700}.task-sub{display:block;color:var(--muted);font-size:12px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pill{display:inline-flex;align-items:center;gap:5px;margin-left:7px;padding:3px 8px;border-radius:99px;background:rgba(140,148,201,.14);color:var(--muted);font-size:10px}.pill:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}.pill.running{color:var(--cyan);background:rgba(85,220,255,.12)}.pill.success{color:var(--green)}.pill.failed,.pill.interrupted{color:var(--red)}.status-retry{border:0;box-shadow:none;cursor:pointer}.status-retry:hover:not(:disabled){transform:none;filter:brightness(1.25)}.participation{margin-left:6px;padding:3px 8px;border:1px solid currentColor;border-radius:99px;background:transparent;box-shadow:none;font-size:10px}.participation.enabled{color:var(--green)}.participation.skipped{color:var(--yellow)}.participation:hover:not(:disabled){transform:none;background:rgba(255,255,255,.08)}.task-actions,.single{display:flex;gap:4px}.task-actions button{width:30px;height:30px;padding:0;border-radius:9px}.single button{white-space:nowrap;font-size:12px;padding:8px 10px}.single .cancel-one{background:linear-gradient(135deg,#c93e67,#ff616f)}
 .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:16px;padding-top:15px;border-top:1px solid var(--line)}.parallel-control{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;margin-right:auto}select{color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 28px 9px 10px;outline:none}
 .batch-grid{display:grid;grid-template-columns:1fr;gap:9px}.batch-item{position:relative;min-height:82px;padding:13px 14px 12px 45px;border-radius:15px;background:var(--panel2);border:1px solid rgba(142,151,255,.12)}.batch-item:before{position:absolute;left:14px;top:15px;font-size:18px}.batch-item.active:before{content:"✦";color:var(--pink)}.batch-item.queue:before{content:"⌛";color:var(--yellow)}.batch-item.done:before{content:"✓";color:var(--green)}.batch-item b{font-size:12px}.batch-item p{white-space:pre-line;line-height:1.55;margin:6px 0 0}
 .log-card{grid-column:1/-1}.log-head,.log-tools{display:flex;align-items:center;justify-content:space-between;gap:12px}.log-tools{justify-content:flex-end}.switch{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.log-view{height:350px;overflow:auto;padding:15px 17px;white-space:pre-wrap;word-break:break-all;border:1px solid rgba(85,220,255,.15);border-radius:15px;background:#050711;color:#7df9bf;font:12px/1.65 Consolas,"Microsoft YaHei",monospace;box-shadow:inset 0 0 38px rgba(0,0,0,.5);scrollbar-color:#6655bc transparent}.log-view:before{content:"●  LIVE LINK";display:block;color:#ff6cae;font-size:10px;letter-spacing:2px;margin-bottom:8px}.log-empty{color:var(--muted)}
 .history{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto}.run{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border:1px solid rgba(142,151,255,.11);border-radius:13px;background:var(--panel2)}.run-main{min-width:0}.run-main b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px}.run-state{padding:4px 8px;border-radius:99px;font-size:10px;background:rgba(140,148,201,.12)}.success{color:var(--green)}.failed,.interrupted{color:var(--red)}.skipped{color:var(--yellow)}.empty{color:var(--muted);padding:20px;text-align:center;border:1px dashed var(--line);border-radius:13px}.toast{position:fixed;right:24px;bottom:24px;z-index:20;max-width:min(390px,calc(100% - 48px));padding:14px 18px;border:1px solid rgba(85,220,255,.35);border-radius:14px;background:rgba(15,18,48,.95);color:#fff;box-shadow:0 15px 45px rgba(0,0,0,.4);transform:translateY(90px);opacity:0;transition:.3s}.toast.show{transform:none;opacity:1}.toast.bad{border-color:rgba(255,102,128,.55)}
 .pill.needs_update,.run-state.needs_update{color:var(--yellow)}.pill.cancelled,.run-state.cancelled{color:var(--red)}
+.readiness-bar{position:relative;display:flex;align-items:center;gap:7px;max-width:520px;height:22px;margin-top:7px;padding:0 9px 0 24px;overflow:hidden;border:1px solid rgba(140,148,201,.16);border-radius:8px;background:rgba(91,98,159,.11);color:var(--muted);font-size:10px}.readiness-bar:before{content:"";position:absolute;left:9px;width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.readiness-bar:after{content:"";position:absolute;left:0;bottom:0;width:100%;height:2px;background:currentColor;opacity:.55}.readiness-bar .readiness-label{font-weight:700;letter-spacing:.4px}.readiness-bar .readiness-detail{margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.78}.readiness-bar.success{color:var(--green);background:rgba(97,242,177,.08)}.readiness-bar.running{color:var(--cyan);background:rgba(85,220,255,.08)}.readiness-bar.queued,.readiness-bar.skipped,.readiness-bar.needs_update{color:var(--yellow);background:rgba(255,204,102,.08)}.readiness-bar.failed,.readiness-bar.interrupted,.readiness-bar.cancelled{color:var(--red);background:rgba(255,102,128,.08)}
 @media(max-width:900px){.hero{grid-template-columns:1fr 210px}.speech{display:none}.layout{grid-template-columns:1fr}.log-card{grid-column:auto}}@media(max-width:650px){.shell{width:min(100% - 18px,1260px);margin-top:12px}.clock{display:none}.hero{display:block;padding:22px}.hero h2{font-size:24px}.companion-wrap{display:none}.task{grid-template-columns:18px 25px 42px 1fr}.task-actions,.single{grid-column:4}.task-actions{justify-content:flex-start}.card{padding:15px}.toolbar{align-items:stretch}.parallel-control{width:100%}.primary,.danger{flex:1}.log-head{align-items:flex-start;flex-direction:column}.log-tools{width:100%;justify-content:space-between}.log-view{height:280px}.brand small{letter-spacing:1px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style></head><body><div class="shell">
@@ -92,37 +161,77 @@ const baseCharacterPool=[
  {name:'有马加奈',series:'我推的孩子',url:'https://s4.anilist.co/file/anilistcdn/character/large/b188783-77orwP7vNuNg.png',quote:'别小看我，日常任务当然能完成。'}
 ];
 let characterPool=[...baseCharacterPool];
-const statusNames={success:'正常结束',failed:'异常结束',needs_update:'需要更新',skipped:'已跳过',interrupted:'已中断',cancelled:'已取消',running:'作战中',idle:'就绪'};
-let workflows=[],order=[],currentStates={},clearAnchor='',latestLines=[],lastLogText='',toastTimer,currentCharacter=null,lastCharacter=-1,draggingId=null,isDragging=false;
+const statusNames={success:'正常结束',failed:'异常结束',needs_update:'需要更新',skipped:'已跳过',interrupted:'已中断',cancelled:'已取消',running:'作战中',queued:'排队中',pending:'未完成',idle:'就绪'};
+let workflows=[],order=[],currentStates={},uiPreferences=null,clearAnchor='',latestLines=[],lastLogText='',toastTimer,currentCharacter=null,lastCharacter=-1,draggingId=null,isDragging=false,currentBusy=false,preferencesSave=Promise.resolve(),ignoredBatchStatuses=new Set(),cancellableTasks=new Set(),cancellingTasks=new Set();
 const $=id=>document.getElementById(id);
-function saved(){try{return JSON.parse(localStorage.getItem('gameflow-order')||'[]')}catch(e){return[]}}
-function persist(){localStorage.setItem('gameflow-order',JSON.stringify(order));localStorage.setItem('gameflow-parallel',$('parallel').value)}
 async function api(url,opt){let r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.message||d.error||'请求失败');return d}
+function preferencePayload(){let workflowPrefs={};workflows.forEach(w=>workflowPrefs[w.id]={enabled:uiPreferences?.workflows?.[w.id]?.enabled!==false});return{version:1,order:[...order],max_parallel:Number($('parallel').value||1),workflows:workflowPrefs}}
+function queuePreferenceSave(showError=true){if(!uiPreferences)return Promise.resolve();let payload=preferencePayload();uiPreferences=payload;preferencesSave=preferencesSave.catch(()=>{}).then(()=>api('/api/preferences',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).then(d=>{uiPreferences=d.preferences;return d}).catch(e=>{if(showError)notify('保存任务开关失败：'+e.message,true);throw e});return preferencesSave}
 function label(id){let w=workflows.find(x=>x.id===id);return w?w.name:id}
 function prettyStatus(value){return statusNames[value]||value||'就绪'}
+function readinessText(value){return({success:'今日已完成',running:'正在执行',queued:'等待执行',failed:'今日执行异常',needs_update:'脚本需要更新',skipped:'今日已跳过',cancelled:'今日已取消',interrupted:'今日已中断',pending:'今日未完成'})[value]||'今日未完成'}
+function readinessTime(value){if(!value)return'';let date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})}
+function escapeAttr(value){return String(value||'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
 function notify(text,bad=false){let el=$('toast');el.textContent=text;el.className='toast show'+(bad?' bad':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='toast',4200)}
 function drawCharacter(){let index;if(characterPool.length>1){do{index=Math.floor(Math.random()*characterPool.length)}while(index===lastCharacter)}else index=0;lastCharacter=index;currentCharacter=characterPool[index];let img=$('operatorAvatar');img.classList.toggle('anime-avatar',!!currentCharacter.url);img.classList.remove('summon-flash');void img.offsetWidth;img.classList.add('summon-flash');img.onerror=()=>{img.onerror=null;img.classList.remove('anime-avatar');img.src='https://enka.network/ui/UI_AvatarIcon_Ayaka.png'};img.src=currentCharacter.url||('https://enka.network/ui/UI_AvatarIcon_'+currentCharacter.file+'.png');img.alt=currentCharacter.name+'女性角色头像';$('operatorName').textContent=currentCharacter.name;$('operatorSeries').textContent=currentCharacter.series;$('operatorPoolSize').textContent='POOL '+characterPool.length;$('gachaStars').textContent='★★★★★';$('operatorSpeech').textContent=currentCharacter.quote}
-function selectedTasks(){let selected={};document.querySelectorAll('#tasks input').forEach(x=>selected[x.dataset.id]=x.checked);return selected}
-function restoreSelected(selected){Object.entries(selected).forEach(([id,value])=>{let input=document.querySelector(`#tasks input[data-id="${id}"]`);if(input)input.checked=value})}
+function workflowEnabled(id){return uiPreferences?.workflows?.[id]?.enabled!==false}
+function setWorkflowEnabled(id,enabled){if(!uiPreferences?.workflows?.[id])return;uiPreferences.workflows[id].enabled=!!enabled;renderTasks(currentStates);queuePreferenceSave();notify(label(id)+(enabled?' 已加入每日流程':' 已设为 SKIPPED'))}
+function toggleWorkflow(id){setWorkflowEnabled(id,!workflowEnabled(id))}
 function clearDropMarks(){document.querySelectorAll('.task').forEach(x=>x.classList.remove('drop-before','drop-after'))}
-function reorderTask(source,targetId,before){if(!source||source===targetId)return false;let selected=selectedTasks(),next=order.filter(x=>x!==source),target=next.indexOf(targetId);if(target<0)return false;next.splice(target+(before?0:1),0,source);order=next;draggingId=null;isDragging=false;clearDropMarks();renderTasks(currentStates);restoreSelected(selected);notify('编队顺序已更新');return true}
+function reorderTask(source,targetId,before){if(!source||source===targetId)return false;let next=order.filter(x=>x!==source),target=next.indexOf(targetId);if(target<0)return false;next.splice(target+(before?0:1),0,source);order=next;draggingId=null;isDragging=false;clearDropMarks();renderTasks(currentStates);queuePreferenceSave();notify('编队顺序已更新');return true}
 function bindTaskDrag(row,id){let active=false,targetId=null,before=true;function movePointer(event){if(!active)return;let target=document.elementFromPoint(event.clientX,event.clientY)?.closest('.task');clearDropMarks();targetId=null;if(!target||target.dataset.id===id)return;let rect=target.getBoundingClientRect();before=event.clientY<rect.top+rect.height/2;targetId=target.dataset.id;target.classList.add(before?'drop-before':'drop-after')}function finish(commit){if(!active)return;document.removeEventListener('mousemove',movePointer);document.removeEventListener('mouseup',dropPointer);if(commit&&targetId)reorderTask(id,targetId,before);active=false;draggingId=null;isDragging=false;targetId=null;clearDropMarks();row.classList.remove('dragging')}function dropPointer(){finish(true)}row.addEventListener('mousedown',event=>{if(event.button!==0||event.target.closest('button,input,select,a'))return;active=true;draggingId=id;isDragging=true;row.classList.add('dragging');document.addEventListener('mousemove',movePointer);document.addEventListener('mouseup',dropPointer,{once:true});event.preventDefault()})}
-function renderTasks(states){$('tasks').innerHTML='';order.forEach((id,i)=>{let w=workflows.find(x=>x.id===id);if(!w)return;let state=states[id]||{},meta=gameMeta[id]||{icon:'◇',color:'#8d7cff'},raw=state.running?'running':(state.last_status||'idle');let row=document.createElement('div');row.className='task'+(state.running?' is-running':'');row.dataset.id=id;row.style.setProperty('--accent',meta.color);row.innerHTML=`<span class="drag-handle" title="按住拖拽调整顺序">⋮⋮</span><input class="select-box" type="checkbox" data-id="${id}" checked aria-label="选择${w.name}"><div class="task-icon">${meta.icon}</div><div><span class="task-name">${w.name}</span><span class="pill ${raw}">${prettyStatus(raw)}</span><span class="task-sub">${state.step?'当前步骤：'+state.step:(state.message||'等待指挥官下令')}</span></div><div class="task-actions"><button class="secondary" title="向前调整" ${i===0?'disabled':''} onclick="move('${id}',-1)">↑</button><button class="secondary" title="向后调整" ${i===order.length-1?'disabled':''} onclick="move('${id}',1)">↓</button></div><div class="single"><button class="secondary" onclick="runOne('${id}')">单队出击</button></div>`;bindTaskDrag(row,id);$('tasks').appendChild(row)});persist()}
-function move(id,delta){let selected=selectedTasks(),i=order.indexOf(id),j=i+delta;if(j<0||j>=order.length)return;[order[i],order[j]]=[order[j],order[i]];renderTasks(currentStates);restoreSelected(selected)}
+function renderTasks(states){
+ $('tasks').innerHTML='';
+ order.forEach((id,i)=>{
+  let w=workflows.find(x=>x.id===id);if(!w)return;
+  let state=states[id]||{},enabled=workflowEnabled(id),cancellable=cancellableTasks.has(id),cancelling=cancellingTasks.has(id),meta=gameMeta[id]||{icon:'◇',color:'#8d7cff'};
+  let raw=state.running?'running':(state.batch_status||state.last_status||'idle');
+  let todayRaw=state.today_status||'pending';
+  if(!enabled&&todayRaw!=='success'&&todayRaw!=='running')todayRaw='skipped';
+  let readyAt=readinessTime(state.today_finished_at||state.today_started_at),readyDetail=readyAt?('更新于 '+readyAt):(todayRaw==='pending'?'等待今日首次执行':'状态实时同步');
+  let statusTag=raw==='skipped'?`<button class="pill skipped status-retry" title="该任务本轮被跳过；点击强制执行" ${currentBusy?'disabled':''} onclick="runOne('${id}',true)">${prettyStatus(raw)} · 重跑</button>`:`<span class="pill ${raw}">${prettyStatus(raw)}</span>`;
+  if(state.tomorrow_update)statusTag+=`<span class="pill needs_update" title="下个游戏日启动脚本后将先等待 10 分钟自动更新">明日更新</span>`;
+  let row=document.createElement('div');row.className='task'+(state.running?' is-running':'')+(enabled?'':' is-disabled');row.dataset.id=id;row.style.setProperty('--accent',meta.color);
+  row.innerHTML=`<span class="drag-handle" title="按住拖拽调整顺序">⋮⋮</span><input class="select-box" type="checkbox" data-id="${id}" ${enabled?'checked':''} onchange="setWorkflowEnabled('${id}',this.checked)" aria-label="${enabled?'停用':'启用'}${w.name}"><div class="task-icon">${meta.icon}</div><div><span class="task-name">${w.name}</span>${statusTag}<button class="participation ${enabled?'enabled':'skipped'}" onclick="toggleWorkflow('${id}')" title="点击切换该任务是否参加每日流程">${enabled?'每日启动':'SKIPPED'}</button><span class="task-sub">${state.step?'当前步骤：'+state.step:(state.batch_message||state.message||'等待指挥官下令')}</span><span class="readiness-bar ${todayRaw}" title="${escapeAttr(state.today_message||readinessText(todayRaw))}"><span class="readiness-label">${readinessText(todayRaw)}</span><span class="readiness-detail">${readyDetail}</span></span></div><div class="task-actions"><button class="secondary" title="向前调整" ${i===0?'disabled':''} onclick="move('${id}',-1)">↑</button><button class="secondary" title="向后调整" ${i===order.length-1?'disabled':''} onclick="move('${id}',1)">↓</button></div><div class="single"><button class="secondary" ${currentBusy?'disabled':''} onclick="runOne('${id}')">单队出击</button><button class="cancel-one" title="只取消这个任务，不影响其他任务" ${cancellable&&!cancelling?'':'disabled'} onclick="cancelOne('${id}')">${cancelling?'取消中':'取消'}</button></div>`;
+  bindTaskDrag(row,id);$('tasks').appendChild(row)
+ })
+}
+function move(id,delta){let i=order.indexOf(id),j=i+delta;if(j<0||j>=order.length)return;[order[i],order[j]]=[order[j],order[i]];renderTasks(currentStates);queuePreferenceSave()}
 function renderHistory(runs){$('history').innerHTML=runs.length?runs.slice(0,12).map(x=>`<div class="run"><div class="run-main"><b>#${x.id} · ${label(x.workflow)}</b><span class="small muted">${x.started_at||'时间未知'}</span></div><span class="run-state ${x.status}">${prettyStatus(x.status)}</span></div>`).join(''):'<div class="empty">暂无行动记录</div>'}
-async function refresh(){try{let d=await api('/api/status');workflows=d.workflows.filter(x=>x.id!=='self_test');if(!order.length){let old=saved();order=[...old.filter(x=>workflows.some(w=>w.id===x)),...workflows.map(w=>w.id).filter(x=>!old.includes(x))];$('parallel').value=localStorage.getItem('gameflow-parallel')||'1'}currentStates=d.state.workflows;if(!isDragging){let checks=selectedTasks();renderTasks(currentStates);restoreSelected(checks)}let busy=d.state.running,batch=d.state.batch,done=batch.completed||[];$('headline').textContent=busy?'作战任务执行中':'系统待命中';$('message').textContent=batch.message||d.state.message;$('statusLight').classList.toggle('busy',busy);if(currentCharacter)$('operatorSpeech').textContent=busy?'「'+currentCharacter.name+'」正在关注本次行动！':currentCharacter.quote;$('active').textContent=(batch.active||d.state.active).map(label).join('、')||'当前无队伍出击';$('queued').textContent=batch.queue.map(label).join('、')||'队列为空';$('completed').textContent=done.map(x=>label(x.workflow)+' · '+prettyStatus(x.status)).join('\n')||'等待行动数据';let total=Math.max(done.length+batch.queue.length+(batch.active||[]).length,workflows.length),finished=done.length;$('progressText').textContent=`${finished} / ${total}`;$('progressFill').style.width=(total?Math.min(100,finished/total*100):0)+'%';$('startDaily').disabled=busy;renderHistory(d.runs||[])}catch(e){$('headline').textContent='指挥链路异常';$('message').textContent=e.message;$('statusLight').classList.add('busy')}}
-async function runDaily(){let selected=order.filter(id=>document.querySelector(`input[data-id="${id}"]`).checked);if(!selected.length){notify('请至少选择一个出击任务',true);return}persist();try{let d=await api('/api/run-daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workflows:selected,max_parallel:Number($('parallel').value)})});notify('✦ '+d.message);refresh()}catch(e){notify(e.message,true)}}
-async function runOne(id){try{let d=await api('/api/run?workflow='+encodeURIComponent(id),{method:'POST'});notify('✦ '+d.message);refresh()}catch(e){notify(e.message,true)}}
+async function refresh(){
+ try{
+  let d=await api('/api/status');workflows=d.workflows.filter(x=>x.id!=='self_test');
+  if(!uiPreferences){let savedState=await api('/api/preferences');uiPreferences=savedState.preferences;order=[...uiPreferences.order];$('parallel').value=String(uiPreferences.max_parallel||1)}
+  let busy=d.state.running,batch=d.state.batch,done=batch.completed||[];currentBusy=busy;currentStates=d.state.workflows;
+  cancellableTasks=new Set([...(batch.queue||[]),...(batch.active||[]),...Object.entries(currentStates).filter(([,state])=>state.running).map(([id])=>id)]);
+  [...cancellingTasks].forEach(id=>{if(!cancellableTasks.has(id))cancellingTasks.delete(id)});
+  if(batch.running)[...(batch.queue||[]),...(batch.active||[])].forEach(id=>ignoredBatchStatuses.delete(id));
+  done.forEach(item=>{if(currentStates[item.workflow]&&!ignoredBatchStatuses.has(item.workflow))currentStates[item.workflow]={...currentStates[item.workflow],batch_status:item.status,batch_message:item.message}});
+  if(!isDragging)renderTasks(currentStates);
+  $('headline').textContent=busy?'作战任务执行中':'系统待命中';$('message').textContent=batch.message||d.state.message;$('statusLight').classList.toggle('busy',busy);
+  if(currentCharacter)$('operatorSpeech').textContent=busy?'「'+currentCharacter.name+'」正在关注本次行动！':currentCharacter.quote;
+  $('active').textContent=(batch.active||d.state.active).map(label).join('、')||'当前无队伍出击';$('queued').textContent=batch.queue.map(label).join('、')||'队列为空';$('completed').textContent=done.map(x=>label(x.workflow)+' · '+prettyStatus(x.status)).join('\n')||'等待行动数据';
+  let enabledIds=workflows.filter(w=>workflowEnabled(w.id)).map(w=>w.id),total=enabledIds.length,finished=enabledIds.filter(id=>currentStates[id]?.today_completed||currentStates[id]?.today_status==='success').length;
+  $('progressText').textContent=`${finished} / ${total}`;$('progressFill').style.width=(total?Math.min(100,finished/total*100):0)+'%';$('startDaily').disabled=busy;renderHistory(d.runs||[])
+ }catch(e){$('headline').textContent='指挥链路异常';$('message').textContent=e.message;$('statusLight').classList.add('busy')}
+}
+async function runDaily(){let selected=order.filter(workflowEnabled);if(!selected.length){notify('所有任务均为 SKIPPED，请先点击标签启用任务',true);return}try{ignoredBatchStatuses.clear();await queuePreferenceSave(false);let d=await api('/api/run-daily',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workflows:selected,max_parallel:Number($('parallel').value)})});notify('✦ '+d.message);refresh()}catch(e){notify(e.message,true)}}
+async function runOne(id,force=false){try{let d=await api('/api/run?workflow='+encodeURIComponent(id)+(force?'&force=true':''),{method:'POST'});if(force)ignoredBatchStatuses.add(id);notify('✦ '+d.message);refresh()}catch(e){notify(e.message,true)}}
+async function cancelOne(id){if(!cancellableTasks.has(id)||cancellingTasks.has(id))return;cancellingTasks.add(id);renderTasks(currentStates);try{let d=await api('/api/cancel?workflow='+encodeURIComponent(id),{method:'POST'});notify(d.message);refresh()}catch(e){cancellingTasks.delete(id);renderTasks(currentStates);notify(e.message,true)}}
 async function stopAll(){try{let d=await api('/api/stop',{method:'POST'});notify(d.message);refresh()}catch(e){notify(e.message,true)}}
 async function refreshLogs(){try{let d=await api('/api/logs?lines=300');latestLines=d.lines||[];let start=0;if(clearAnchor){let i=latestLines.lastIndexOf(clearAnchor);start=i>=0?i+1:0}let visible=latestLines.slice(start),text=visible.length?visible.join('\n'):'暂无新日志';let view=$('logView'),nearBottom=view.scrollHeight-view.scrollTop-view.clientHeight<45;if(text!==lastLogText){view.textContent=text;if($('autoScroll').checked&&nearBottom)view.scrollTop=view.scrollHeight;lastLogText=text}}catch(e){$('logView').textContent='日志读取失败：'+e.message}}
 function clearLogView(){clearAnchor=latestLines.length?latestLines[latestLines.length-1]:'';lastLogText='';$('logView').textContent='终端显示已清空，等待新信号……'}
 function toggleTheme(){document.body.classList.toggle('day');localStorage.setItem('gameflow-day',document.body.classList.contains('day')?'1':'0')}
 function updateClock(){let now=new Date();$('clock').textContent='SYNC '+now.toLocaleTimeString('zh-CN',{hour12:false})}
-if(localStorage.getItem('gameflow-day')==='1')document.body.classList.add('day');drawCharacter();updateClock();refresh();refreshLogs();setInterval(updateClock,1000);setInterval(refresh,1500);setInterval(refreshLogs,1000);
+function saveBeforeExit(){if(!uiPreferences)return;let body=JSON.stringify(preferencePayload());navigator.sendBeacon('/api/preferences',new Blob([body],{type:'application/json'}))}
+if(localStorage.getItem('gameflow-day')==='1')document.body.classList.add('day');$('parallel').addEventListener('change',()=>queuePreferenceSave());window.addEventListener('pagehide',saveBeforeExit);drawCharacter();updateClock();refresh();refreshLogs();setInterval(updateClock,1000);setInterval(refresh,1500);setInterval(refreshLogs,1000);
 </script></body></html>'''
 
 
 def handler_for(manager: WorkflowManager):
+    preferences = UiPreferences(manager.root / "data" / "ui_preferences.json",
+                                list(manager.config["workflows"]))
+
     class Handler(BaseHTTPRequestHandler):
         def _json(self, value, status=200):
             body = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -150,7 +259,11 @@ def handler_for(manager: WorkflowManager):
                 workflows = [{"id": key, "name": value.get("display_name", key)}
                              for key, value in manager.config["workflows"].items()]
                 self._json({"state": manager.state(), "workflows": workflows,
-                            "runs": manager.store.recent()})
+                            "runs": manager.store.recent(),
+                            "preferences": preferences.get()})
+                return
+            if parsed.path == "/api/preferences":
+                self._json({"preferences": preferences.get()})
                 return
             if parsed.path == "/api/logs":
                 query = urllib.parse.parse_qs(parsed.query)
@@ -173,6 +286,13 @@ def handler_for(manager: WorkflowManager):
 
         def do_POST(self):
             parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/preferences":
+                try:
+                    value = preferences.update(self._body())
+                    self._json({"ok": True, "preferences": value})
+                except (ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
+                    self._json({"ok": False, "message": f"保存界面状态失败：{exc}"}, 400)
+                return
             if parsed.path == "/api/run":
                 query = urllib.parse.parse_qs(parsed.query)
                 workflow = query.get("workflow", [""])[0]
@@ -189,6 +309,12 @@ def handler_for(manager: WorkflowManager):
                     self._json({"ok": ok, "message": message}, 200 if ok else 409)
                 except (ValueError, TypeError, json.JSONDecodeError) as exc:
                     self._json({"ok": False, "message": f"请求格式错误：{exc}"}, 400)
+                return
+            if parsed.path == "/api/cancel":
+                query = urllib.parse.parse_qs(parsed.query)
+                workflow = query.get("workflow", [""])[0]
+                ok, message = manager.cancel(workflow)
+                self._json({"ok": ok, "message": message}, 200 if ok else 409)
                 return
             if parsed.path == "/api/stop":
                 ok, message = manager.stop()
