@@ -303,9 +303,13 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     if not exe.exists():
         return Result(False, f"找不到 MAA GUI：{exe}")
     log_path = Path(expand(str(step.get("log_path") or exe.parent / "debug" / "asst.log")))
+    gui_log_value = str(step.get("gui_log_path", "")).strip()
+    gui_log_path = Path(expand(gui_log_value)) if gui_log_value else None
     marker = str(step.get("completion_marker", "AllTasksCompleted"))
     error_markers = [str(x) for x in step.get("error_markers", ["TaskChainError", "AllTasksError"])]
     start_size = log_path.stat().st_size if log_path.exists() else 0
+    gui_start_size = (gui_log_path.stat().st_size
+                      if gui_log_path is not None and gui_log_path.exists() else 0)
     try:
         proc = subprocess.Popen([str(exe)], cwd=str(exe.parent),
                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -315,7 +319,10 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     started = time.monotonic()
     ctx.log(f"MAA GUI 已启动，等待完成标记：{marker}")
     position = start_size
+    gui_position = gui_start_size
     tail = ""
+    last_gui_event = None
+    gpu_warning_seen = False
     exit_seen_at = None
     successor_seen = False
     restart_grace = float(step.get("restart_grace_seconds", 120))
@@ -330,6 +337,28 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
             black_screen = watchdog.poll()
             if black_screen is not None:
                 return black_screen
+            if gui_log_path is not None and gui_log_path.exists():
+                gui_size = gui_log_path.stat().st_size
+                if gui_size < gui_position:
+                    gui_position = 0
+                if gui_size > gui_position:
+                    with gui_log_path.open("rb") as handle:
+                        handle.seek(gui_position)
+                        gui_chunk = handle.read().decode("utf-8", errors="replace")
+                    gui_position = gui_size
+                    for line in gui_chunk.splitlines():
+                        task_event = re.search(r"(开始任务|完成任务):\s*(.+?)\s*$", line)
+                        if task_event:
+                            event = (task_event.group(1), task_event.group(2))
+                            if event != last_gui_event:
+                                last_gui_event = event
+                                ctx.log(f"MAA {event[0]}：{event[1]}")
+                        if (not gpu_warning_seen
+                                and "推理加速 GPU" in line
+                                and "兼容性问题" in line):
+                            gpu_warning_seen = True
+                            ctx.log("MAA 警告：当前推理加速 GPU 存在兼容性问题，"
+                                    "建议关闭 GPU 加速以避免识别停滞")
             if log_path.exists():
                 size = log_path.stat().st_size
                 if size < position:
