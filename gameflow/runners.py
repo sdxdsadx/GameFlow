@@ -2965,6 +2965,17 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
     completion_markers = [str(x) for x in step.get("completion_markers", [])]
     error_markers = [str(x) for x in step.get("error_markers", [])]
     update_markers = [str(x) for x in step.get("update_markers", [])]
+    dismiss_update_notice = bool(step.get("dismiss_update_notice", False))
+    update_ack_button_names = [
+        str(x) for x in step.get("update_ack_button_names", ["好的"])
+    ]
+    update_ack_x_ratio = float(step.get("update_ack_x_ratio", 0.366))
+    update_ack_y_ratio = float(step.get("update_ack_y_ratio", 0.912))
+    update_ack_settle_seconds = max(
+        0.0, float(step.get("update_ack_settle_seconds", 2)))
+    update_ack_retry_interval = max(
+        0.05, float(step.get("update_ack_retry_interval", retry_interval)))
+    max_update_ack_clicks = max(1, int(step.get("max_update_ack_clicks", 5)))
     screenshot_markers = [str(x) for x in step.get("screenshot_markers", [])]
     screenshot_path = expand(str(step.get("screenshot_path", "")))
     game_process = str(step.get("game_process_image", ""))
@@ -2978,6 +2989,9 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
     completion_log = None
     click_count = 0
     max_start_clicks = max(1, int(step.get("max_start_clicks", 20)))
+    update_notice_marker = None
+    update_ack_clicks = 0
+    next_update_ack_at = None
     screenshot_saved = False
     screenshot_evidence_seen = False
     game_foregrounded = False
@@ -3091,14 +3105,21 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                                 ctx.log(f"{display_name}当前状态：{state_key}")
                 for marker in update_markers:
                     if marker in content:
-                        capture_reward(force=True)
-                        return Result(
-                            False,
-                            f"{display_name}检测到需要更新：{marker}",
-                            {"log": name, "marker": marker,
-                             "start_clicks": click_count,
-                             "screenshot": screenshot_path if screenshot_saved else None},
-                            status="needs_update")
+                        if not dismiss_update_notice:
+                            capture_reward(force=True)
+                            return Result(
+                                False,
+                                f"{display_name}检测到需要更新：{marker}",
+                                {"log": name, "marker": marker,
+                                 "start_clicks": click_count,
+                                 "screenshot": (screenshot_path
+                                                if screenshot_saved else None)},
+                                status="needs_update")
+                        update_notice_marker = marker
+                        if next_update_ack_at is None:
+                            next_update_ack_at = time.monotonic()
+                            ctx.log(f"{display_name}检测到新版本公告，将点击“好的”"
+                                    "跳过本次更新并继续运行")
                 for marker in error_markers:
                     if run_started and marker in content:
                         return failure(f"{display_name}异常结束：{marker}",
@@ -3113,6 +3134,7 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                     capture_reward()
                 return Result(True, f"{display_name}正常结束",
                               {"log": completion_log, "start_clicks": click_count,
+                               "update_ack_clicks": update_ack_clicks,
                                "screenshot": screenshot_path if screenshot_saved else None})
             if worker_images:
                 worker_running = _process_image_exists(worker_images)
@@ -3170,6 +3192,34 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                 ctx.log(f"{display_name}针对状态“{last_state_key}”执行第"
                         f" {targeted_recovery_count} 次恢复：{'；'.join(results)}")
                 targeted_recovery_next_at = time.monotonic() + targeted_interval
+            if (update_notice_marker is not None and not run_started
+                    and next_update_ack_at is not None
+                    and time.monotonic() >= next_update_ack_at):
+                if update_ack_clicks >= max_update_ack_clicks:
+                    capture_reward(force=True)
+                    return Result(
+                        False,
+                        f"{display_name}检测到新版本公告，但点击“好的”"
+                        f" {max_update_ack_clicks} 次后仍未进入任务状态",
+                        {"marker": update_notice_marker,
+                         "update_ack_clicks": update_ack_clicks,
+                         "start_clicks": click_count,
+                         "screenshot": (screenshot_path
+                                        if screenshot_saved else None)},
+                        status="needs_update")
+                update_ack_clicks += 1
+                clicked, message = _click_named_gui_button(
+                    proc.pid, process_images, title_hints,
+                    update_ack_button_names,
+                    update_ack_x_ratio, update_ack_y_ratio)
+                ctx.log(f"{display_name}第 {update_ack_clicks} 次跳过更新公告：{message}")
+                now = time.monotonic()
+                next_update_ack_at = now + update_ack_retry_interval
+                if clicked:
+                    next_click_at = now + update_ack_settle_seconds
+                else:
+                    next_click_at = now + min(update_ack_retry_interval, 3)
+                continue
             # A detached OneDragon Qt window can stop servicing Win32 title
             # queries while its worker is busy.  Once fresh logs prove the run
             # started, querying that GUI is both unnecessary and capable of
