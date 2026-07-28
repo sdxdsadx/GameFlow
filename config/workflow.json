@@ -1,5 +1,7 @@
 {
   "server": {"host": "127.0.0.1", "port": 8765},
+  "failure_diagnostics": {"enabled": true},
+  "failure_retry": {"enabled": true, "max_attempts": 2, "retry_delay": 10},
   "email_report": {
     "enabled": true,
     "recipient": "26142328@qq.com",
@@ -82,7 +84,7 @@
       "steps": [
         {"id": "start_emulator", "runner": "ldplayer", "action": "launch", "instance": 1, "timeout": 120, "settle_seconds": 8, "retry": 1},
         {"id": "wait_for_android", "runner": "adb", "action": "wait", "device": "emulator-5556", "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
-        {"id": "run_maa_daily", "runner": "maa_gui", "executable": "E:\\MAA\\MAA-v5.3.1-win-x64\\MAA.exe", "log_path": "E:\\MAA\\MAA-v5.3.1-win-x64\\debug\\asst.log", "gui_log_path": "E:\\MAA\\MAA-v5.3.1-win-x64\\debug\\gui.log", "restart_grace_seconds": 120, "timeout": 3600, "completion_marker": "AllTasksCompleted", "close_on_complete": true},
+        {"id": "run_maa_daily", "runner": "maa_gui", "executable": "E:\\MAA\\MAA-v5.3.1-win-x64\\MAA.exe", "log_path": "E:\\MAA\\MAA-v5.3.1-win-x64\\debug\\asst.log", "gui_log_path": "E:\\MAA\\MAA-v5.3.1-win-x64\\debug\\gui.log", "device": "emulator-5556", "emulator_kind": "ldplayer", "emulator_instance": 1, "black_screen_watchdog": true, "black_screen_check_interval": 30, "black_screen_timeout": 300, "max_black_screen_restarts": 1, "emulator_ready_timeout": 180, "restart_grace_seconds": 120, "log_stall_seconds": 1800, "timeout": 3600, "completion_marker": "AllTasksCompleted", "close_on_complete": true},
         {"id": "final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5556", "path": "G:\\project_I\\logs\\final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
         {"id": "stop_emulator", "runner": "ldplayer", "action": "quit", "instance": 1, "timeout": 60, "run_always": true}
       ]
@@ -92,170 +94,89 @@
       "once_per_day": true,
       "trigger": {"type": "daily", "time": "09:00", "enabled": false},
       "steps": [
-        {"id": "start_blue_archive_emulator", "runner": "ldplayer"ónxæÚ$z{-®éÜj×ˆ¹k§¹/¢È9aj9ieù¥éyn.ˆ9o 9iâù¢iú(c9.îùb¨K9¥l:aãÎˆK9b!¹«­Nˆš[X\N˜Z[[™ÎŒWˆ‚ˆ¹k§¹/¢È9aj9ieù¥éyn.ˆ9.îùb¨y¢iú(c9i,z-)Wˆ‹[˜ÛÙ[™ÏH]‹NŠB‚ˆ™XY[™Ë•™XY
-\™Ù]]Üš]WÛÙËY[[ÛUYJKœİ\
-
-Bˆİ\HÈ™^Xİ]X›HˆİŠ^JK›Ù×ÙÛØˆˆİŠÙÜÈÈŒŒÏËOÏËOÏËJ‹›ÙÈŠKˆ[Y[İ]ˆ‹˜ÛX[—Ù^\İ[™Èˆ˜[ÙK˜ÛÜÙWÛÛ—ØÛÛ\]Hˆ˜[ÙKˆ™İZWØÛXÚ×Ù˜[˜XÚÈˆ˜[Ù_BˆÚ]]Ú
-™Ø[YY›İËœ[›™\œËœİXœ›ØÙ\ÜË”Ü[ˆ‹™]\›—İ˜[YOQ˜ZÙT›ØÙ\ÜÊ
-JN‚ˆ™\İ[H[—ÛXXY[™ÙİZJİ\İ
-BˆÙ[‹˜\ÜÙ\˜[ÙJ™\İ[œİXØÙ\ÜÊBˆÙ[‹˜\ÜÙ\[Š¹o ¹n.9îäù§gÈ‹™\İ[›Y\ÜØYÙJB‚ˆYˆ\İÛXXY[™Ùœ˜[Y]ÛÜš×Ù˜Z[\™WØØ[››İØ™WÜ™\ÜYØ\×ÜİXØÙ\ÜÊÙ[ŠN‚ˆÛ\ÜÈ˜ZÙT›ØÙ\ÜÎ‚ˆYHLŒÍMÎBˆ™]\›˜ÛÙHH›Û™BˆYˆÛ
-Ù[ŠNˆ™]\›ˆ›Û™BˆYˆ\›Z[˜]JÙ[ŠNˆÙ[‹œ™]\›˜ÛÙHH‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-NÈ^HH›ÛİÈ“XXQ[™™^HÈ^KÜš]WØ]\ÊˆˆŠBˆÙÜÈH›ÛİÈ™XYÈÈÙÜË›ZÙ\Š
-BˆYÚHÙÜÈÈŒŒ‹LËLNLK›ÙÈÈYÚÜš]Wİ^
-ˆ‹[˜ÛÙ[™ÏH]‹NŠBˆœ˜[Y]ÛÜšÈHÙÜÈÈ›XXYË›ÙÈÈœ˜[Y]ÛÜšËÜš]Wİ^
-ˆ‹[˜ÛÙ[™ÏH]‹NŠBˆİH[ÛÛ^
-›ÛİßK[X™HÎˆ›Û™K™XY[™Ë‘]™[
-
-JB‚ˆYˆÜš]WÙ˜Z[\™J
-N‚ˆ[YKœÛY\
-ŒJBˆYÚÜš]Wİ^
-ˆ¹k§¹/¢È9aj9ieù¥éyn.ˆ9o 9iâù¢iú(c9.îùb¨K9¥l:aãÎˆK9b!¹«­Nˆš[X\N˜Z[[™ÎŒWˆ‚ˆ¹k§¹/¢È9aj9ieù¥éyn.ˆ9.îùb¨ymì¹£ä9.©\Ú×ÚYÎˆÌK‹ËWWˆ‚ˆ¹k§¹/¢È9aj9ieù¥éyn.ˆ9¥-¹l/¹«­yb!ù£h¹..ˆ[[^HÛÛ›Û\—ˆ‹[˜ÛÙ[™ÏH]‹NŠBˆœ˜[Y]ÛÜšËÜš]Wİ^
-ˆ	ÈHHSÛ‘]™[›İYHHHHÛ\ÙÏU\ÚÙ\‹•\ÚË‘˜Z[YH	Âˆ	ÖÙ]Z[Ï^È™[Hˆ‘Z[T™]Ø\™İ\‹\Ú×ÚYWW‰Ë[˜ÛÙ[™ÏH]‹NŠB‚ˆ™XY[™Ë•™XY
-\™Ù]]Üš]WÙ˜Z[\™KY[[ÛUYJKœİ\
-
-Bˆİ\HÈ™^Xİ]X›HˆİŠ^JK›Ù×ÙÛØˆˆİŠÙÜÈÈŒŒÏËOÏËOÏËJ‹›ÙÈŠKˆ™œ˜[Y]ÛÜš×ÛÙ×Ü]ˆİŠœ˜[Y]ÛÜšÊK[Y[İ]ˆËˆ˜ÛX[—Ù^\İ[™Èˆ˜[ÙK˜ÛÜÙWÛÛ—ØÛÛ\]Hˆ˜[ÙKˆ™İZWØÛXÚ×Ù˜[˜XÚÈˆ˜[ÙK™Ø[YWÜ›ØÙ\Ü×Ú[XYÙHˆ‘[™šY[™^H‹ˆœØÜ™Y[œÚİÜ]ˆİŠ›ÛİÈ™[™šY[œ™ÈŠ_BˆÚ]]Ú
-™Ø[YY›İËœ[›™\œËœİXœ›ØÙ\ÜË”Ü[ˆ‹™]\›—İ˜[YOQ˜ZÙT›ØÙ\ÜÊ
-JKˆ]Ú
-™Ø[YY›İËœ[›™\œËœ[—İÚ[™İ×ÜØÜ™Y[œÚİ‹ˆ™]\›—İ˜[YOT™\İ[
-YKœØ]™YŠJN‚ˆ™\İ[H[—ÛXXY[™ÙİZJİ\İ
-BˆÙ[‹˜\ÜÙ\˜[ÙJ™\İ[œİXØÙ\ÜÊBˆÙ[‹˜\ÜÙ\[Š‘Z[T™]Ø\™İ\‹™\İ[›Y\ÜØYÙJB‚ˆYˆ\İÛXXY[™İ\]WÛX\šÙ\—Ø™XÛÛY\×Û™YY×İ\]JÙ[ŠN‚ˆÛ\ÜÈ˜ZÙT›ØÙ\ÜÎ‚ˆYHLŒÍMÎBˆ™]\›˜ÛÙHH›Û™BˆYˆÛ
-Ù[ŠNˆ™]\›ˆ›Û™BˆYˆ\›Z[˜]JÙ[ŠNˆÙ[‹œ™]\›˜ÛÙHH‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-NÈ^HH›ÛİÈ“XXQ[™™^HÈ^KÜš]WØ]\ÊˆˆŠBˆÙÜÈH›ÛİÈ™XYÈÈÙÜË›ZÙ\Š
-BˆİH[ÛÛ^
-›ÛİßK[X™HÎˆ›Û™K™XY[™Ë‘]™[
-
-JB‚ˆYˆÜš]WÛÙÊ
-N‚ˆ[YKœÛY\
-ŒJBˆ
-ÙÜÈÈŒŒ‹LËLMKLK›ÙÈŠKÜš]Wİ^
-ˆ¹¦í9¥¬9¨à9§éyk£9¢$ˆ9§ 9¥¬9âb9§+]KKK9§"y¦í9¥¬]YWˆ‹[˜ÛÙ[™ÏH]‹NŠB‚ˆ™XY[™Ë•™XY
-\™Ù]]Üš]WÛÙËY[[ÛUYJKœİ\
-
-Bˆİ\HÈ™^Xİ]X›HˆİŠ^JK›Ù×ÙÛØˆˆİŠÙÜÈÈŒŒÏËOÏËOÏËJ‹›ÙÈŠKˆ[Y[İ]ˆ‹˜ÛX[—Ù^\İ[™Èˆ˜[ÙK˜ÛÜÙWÛÛ—ØÛÛ\]Hˆ˜[ÙKˆ™İZWØÛXÚ×Ù˜[˜XÚÈˆ˜[Ù_BˆÚ]]Ú
-™Ø[YY›İËœ[›™\œËœİXœ›ØÙ\ÜË”Ü[ˆ‹™]\›—İ˜[YOQ˜ZÙT›ØÙ\ÜÊ
-JN‚ˆ™\İ[H[—ÛXXY[™ÙİZJİ\İ
-BˆÙ[‹˜\ÜÙ\˜[ÙJ™\İ[œİXØÙ\ÜÊBˆÙ[‹˜\ÜÙ\\]X[
-™\İ[œİ]\Ë›™YY×İ\]HŠB‚ˆYˆ\İÙ[™Ú[™WÜ›ÜYØ]\×Û™YY×İ\]WÜİ]\ÊÙ[ŠN‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-NÈİÜ™HHİÜ™J›ÛİÈ™‹œÜ[]HŠBˆÛÛ™šYÈHÈÛÜšÙ›İÜÈˆÈ™Z[HˆÈœİ\ÈˆÂˆÈšYˆ™\œÚ[Ûˆ‹œ[›™\ˆˆ™˜ZÙWİ\]HŸBˆ___BˆÚ]]Ú™Xİ
-•S“‘T”ËÈ™˜ZÙWİ\]Hˆ[X™Hİ\İˆ™\İ[
-ˆ˜[ÙK¹®.9¢#úg :) y¦í9¥¬‹È›X\šÙ\ˆˆ\]HŸK›™YY×İ\]HŠ_JN‚ˆ[™Ú[™HH[™Ú[™J›ÛİÛÛ™šYËİÜ™JBˆ[™Ú[™Kœİ\
-™Z[HŠBˆ[™Ú[™Kš›Ú[ŠŠBˆÙ[‹˜\ÜÙ\\]X[
-[™Ú[™Kœİ]J
-VÈ›\İÜİ]\È—K›™YY×İ\]HŠBˆÙ[‹˜\ÜÙ\\]X[
-İÜ™Kœ™XÙ[
-
-VÌVÈœİ]\È—K›™YY×İ\]HŠB‚ˆYˆ\İÛÙ×ÙİZWÙZ[WÜ™]šY\×ØÛXÚ×Ø[™ØØ\\™\×Ü™]Ø\™
-Ù[ŠN‚ˆÛ\ÜÈ˜ZÙT›ØÙ\ÜÎ‚ˆYHLŒÍMÎBˆ™]\›˜ÛÙHH›Û™BˆYˆÛ
-Ù[ŠNˆ™]\›ˆ›Û™BˆYˆ\›Z[˜]JÙ[ŠNˆÙ[‹œ™]\›˜ÛÙHH‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-NÈ^HH›ÛİÈ“][˜Ú\‹™^HÈ^KÜš]WØ]\ÊˆˆŠBˆÙÈH›ÛİÈ™Z[K›ÙÈÈÙËÜš]Wİ^
-ˆ‹[˜ÛÙ[™ÏH]‹NŠBˆİH[ÛÛ^
-›ÛİßK[X™HÎˆ›Û™K™XY[™Ë‘]™[
-
-JB‚ˆYˆÜš]WÛÙÊ
-N‚ˆ[YKœÛY\
-ŒÊBˆÙËÜš]Wİ^
-”•SˆÕT•”‘UĞT‘QÑWSÓ‘Wˆ‹[˜ÛÙ[™ÏH]‹NŠB‚ˆ™XY[™Ë•™XY
-\™Ù]]Üš]WÛÙËY[[ÛUYJKœİ\
-
-Bˆİ\HÈ™\Ü^WÛ˜[YHˆ¹­bú+åy«ãù¥éH‹™^Xİ]X›HˆİŠ^JKˆ›Ù×ÙÛØˆˆİŠÙÊKœ›ØÙ\Ü×Ú[XYÙ\ÈˆÈ“][˜Ú\‹™^H—Kˆ˜]Û—Û˜[Y\ÈˆÈ¹k£9¥m:/ä:(c—K]WÚ[ÈˆÈ•\İ—Kˆ›Ù×Ü™]WÚ[\˜[ˆŒKœİ\ÛX\šÙ\œÈˆÈ”•SˆÕT•—Kˆ˜ÛÛ\][Û—ÛX\šÙ\œÈˆÈSÓ‘H—KˆœØÜ™Y[œÚİÛX\šÙ\œÈˆÈ”‘UĞT‘QÑH—KˆœØÜ™Y[œÚİÜ]ˆİŠ›ÛİÈœ™]Ø\™œ™ÈŠKˆ˜œš[™×ÙØ[YWİ×Ùœ›ÛˆYK™Ø[YWÜ›ØÙ\Ü×Ú[XYÙHˆ‘Ø[YK™^H‹ˆ˜ÛÛ\][Û—Ü]ZY]ÜÙXÛÛ™ÈˆŒKˆ[Y[İ]ˆ‹˜ÛX[—Ù^\İ[™Èˆ˜[ÙK˜ÛÜÙWÛÛ—ØÛÛ\]Hˆ˜[Ù_BˆÚ]]Ú
-™Ø[YY›İËœ[›™\œËœİXœ›ØÙ\ÜË”Ü[ˆ‹™]\›—İ˜[YOQ˜ZÙT›ØÙ\ÜÊ
-JKˆ]Ú
-™Ø[YY›İËœ[›™\œË—ØÛXÚ×Û˜[YYÙİZWØ]Ûˆ‹ˆ™]\›—İ˜[YOJYK˜ÛXÚÙYŠJH\ÈÛXÚËˆ]Ú
-™Ø[YY›İËœ[›™\œË—Øœš[™×ÙØ[YWİÚ[™İ×İ×Ùœ›Û‹ˆ™]\›—İ˜[YOT™\İ[
-YK™›Ü™YÜ›İ[™ŠJH\È›Ü™YÜ›İ[™ˆ]Ú
-™Ø[YY›İËœ[›™\œËœ[—İÚ[™İ×ÜØÜ™Y[œÚİ‹ˆ™]\›—İ˜[YOT™\İ[
-YKœØ]™YŠJH\ÈØÜ™Y[œÚİ‚ˆ™\İ[H[—ÛÙ×ÙİZWÙZ[Jİ\İ
-BˆÙ[‹˜\ÜÙ\YJ™\İ[œİXØÙ\ÜÊBˆÙ[‹˜\ÜÙ\Ü™X]\‘\]X[
-ÛXÚË˜Ø[ØÛİ[ŠBˆ›Ü™YÜ›İ[™˜\ÜÙ\ØØ[YÛÛ˜ÙJ
-BˆØÜ™Y[œÚİ˜\ÜÙ\ØØ[YÛÛ˜ÙJ
-B‚ˆYˆ\İÛÙ×ÙİZWÙZ[WÜİ[YÜİ]WÙ˜Z[×İÚ]Øİ\œ™[ÜØÜ™Y[œÚİ
-Ù[ŠN‚ˆÛ\ÜÈ˜ZÙT›ØÙ\ÜÎ‚ˆYHLŒÍMÎBˆ™]\›˜ÛÙHH›Û™BˆÜ›İHH˜[ÙBˆYˆÛ
-Ù[ŠN‚ˆYˆ›İÙ[‹Ü›İN‚ˆÙ[‹Ü›İHHYBˆÙËÜš]Wİ^
-ˆ”•SˆÕT•¹£!ù.éÈ9aî¹¢&H:" ¹à®H9¨à9­bù®.9¢#ùê¥ùcèÈOˆ9aî¹¢&:/å9fç¹â­¹  H9£"zd«‹yaî¹¢&ˆ‹ˆ[˜ÛÙ[™ÏH]‹NŠBˆ™]\›ˆ›Û™BˆYˆ\›Z[˜]JÙ[ŠNˆÙ[‹œ™]\›˜ÛÙHH‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-NÈ^HH›ÛİÈ“][˜Ú\‹™^HÈ^KÜš]WØ]\ÊˆˆŠBˆÙÈH›ÛİÈ™Z[K›ÙÈÈÙËÜš]Wİ^
-ˆ‹[˜ÛÙ[™ÏH]‹NŠBˆİH[ÛÛ^
-›ÛİßK[X™HÎˆ›Û™K™XY[™Ë‘]™[
-
-JBˆİ\HÈ™\Ü^WÛ˜[YHˆ¹­bú+åy«ãù¥éH‹™^Xİ]X›HˆİŠ^JKˆ›Ù×ÙÛØˆˆİŠÙÊKœ›ØÙ\Ü×Ú[XYÙ\ÈˆÈ“][˜Ú\‹™^H—Kˆœİ\ÛX\šÙ\œÈˆÈ”•SˆÕT•—K›Ù×Ü™]WÚ[\˜[ˆŒKˆœİ]WİØ]ÚÙ×Ü™YÙ^ˆˆ¹£!ù.é×ÊŠ×—WJÊWÊ—WÊº" ¹à®WÊŠŠÊWÊ‹O‹Šú/å9fç¹â­¹  WÊŠŠŠI‹ˆœİ]WÜİ[ÜÙXÛÛ™ÈˆŒKœİ]WÜ™XÛİ™\WÜÙXÛÛ™ÈˆŒKˆ™Ø[YWÜ›ØÙ\Ü×Ú[XYÙHˆ‘Ø[YK™^H‹œØÜ™Y[œÚİÜ]ˆİŠ›ÛİÈ™˜Z[\™Kœ™ÈŠKˆš[š]X[ØÛXÚ×Ù[^HˆLˆ[Y[İ]ˆË˜ÛX[—Ù^\İ[™Èˆ˜[ÙK˜ÛÜÙWÛÛ—ØÛÛ\]Hˆ˜[Ù_BˆÚ]]Ú
-™Ø[YY›İËœ[›™\œËœİXœ›ØÙ\ÜË”Ü[ˆ‹™]\›—İ˜[YOQ˜ZÙT›ØÙ\ÜÊ
-JKˆ]Ú
-™Ø[YY›İËœ[›™\œË—Øœš[™×ÙØ[YWİÚ[™İ×İ×Ùœ›Û‹ˆ™]\›—İ˜[YOT™\İ[
-YK™›Ü™YÜ›İ[™ŠJKˆ]Ú
-™Ø[YY›İËœ[›™\œËœ[—İÚ[™İ×ÜØÜ™Y[œÚİ‹ˆ™]\›—İ˜[YOT™\İ[
-YKœØ]™YŠJH\ÈØÜ™Y[œÚİ‚ˆ™\İ[H[—ÛÙ×ÙİZWÙZ[Jİ\İ
-BˆÙ[‹˜\ÜÙ\˜[ÙJ™\İ[œİXØÙ\ÜÊBˆÙ[‹˜\ÜÙ\[Š¹£"zd«‹yaî¹¢&‹™\İ[›Y\ÜØYÙJBˆØÜ™Y[œÚİ˜\ÜÙ\ØØ[Y
-
-B‚ˆYˆ\İÙ^Û\Ú]™WÙZ[WÙÜ›İ\Û™]™\—Ü[œ×İÙÙ]\ŠÙ[ŠN‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-NÈİÜ™HHİÜ™J›ÛİÈ™‹œÜ[]HŠBˆÛÛ™šYÈHÈÛÜšÙ›İÜÈˆÂˆ™[™šY[ˆÈ™^Û\Ú]™WÙÜ›İ\ˆœ×ÙÜ›İ\‹œİ\ÈˆÂˆÈšYˆ™[™šY[‹œ[›™\ˆˆœ™XÛÜ™ŸW_Kˆ™[›\ÜÈˆÈ™^Û\Ú]™WÙÜ›İ\ˆœ×ÙÜ›İ\‹œİ\ÈˆÂˆÈšYˆ™[›\ÜÈ‹œ[›™\ˆˆœ™XÛÜ™ŸW_Kˆœİ\œ˜Z[ˆÈ™^Û\Ú]™WÙÜ›İ\ˆœ×ÙÜ›İ\‹œİ\ÈˆÂˆÈšYˆœİ\œ˜Z[‹œ[›™\ˆˆœ™XÛÜ™ŸW_Kˆ_Bˆ[\˜[ÈHßB‚ˆYˆ™XÛÜ™
-İ\İ
-N‚ˆ[\˜[ÖÜİ\ÈšY—WHHİ[YK›[Û›İÛšXÊ
-K›Û™WBˆ[YKœÛY\
-Œ
-Bˆ[\˜[ÖÜİ\ÈšY—WVÌWHH[YK›[Û›İÛšXÊ
-Bˆ™]\›ˆ™\İ[
-YK™Û™HŠB‚ˆÚ]]Ú™Xİ
-•S“‘T”ËÈœ™XÛÜ™ˆ™XÛÜ™JN‚ˆX[˜YÙ\ˆHÛÜšÙ›İÓX[˜YÙ\Š›ÛİÛÛ™šYËİÜ™JBˆÚËÈHX[˜YÙ\‹œİ\ÙZ[JÈ™[™šY[‹™[›\ÜÈ‹œİ\œ˜Z[—KŠBˆÙ[‹˜\ÜÙ\YJÚÊBˆX[˜YÙ\‹š›Ú[ŠÊBˆÜ™\™YHÛÜY
-[\˜[Ë˜[Y\Ê
-KÙ^O[[X™H][Nˆ][VÌJBˆÙ[‹˜\ÜÙ\\]X[
-[ŠÜ™\™Y
-KÊBˆÙ[‹˜\ÜÙ\YJ[
-Ü™\™YÚ[™^VÌWHHÜ™\™YÚ[™^
-ÈWVÌBˆ›Üˆ[™^[ˆ˜[™ÙJŠJJB‚ˆYˆ\İÛX[X[Üİ\Ü™\ÜXİ×Ù^Û\Ú]™WÙÜ›İ\
-Ù[ŠN‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-BˆÛÛ™šYÈHÈÛÜšÙ›İÜÈˆÂˆ™[™šY[ˆÈ™^Û\Ú]™WÙÜ›İ\ˆœ×ÙÜ›İ\‹œİ\ÈˆÂˆÈšYˆØZ]‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒßW_Kˆ™[›\ÜÈˆÈ™^Û\Ú]™WÙÜ›İ\ˆœ×ÙÜ›İ\‹œİ\ÈˆÂˆÈšYˆØZ]‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒ_W_Kˆ_BˆX[˜YÙ\ˆHÛÜšÙ›İÓX[˜YÙ\Š›ÛİÛÛ™šYËİÜ™J›ÛİÈ™‹œÜ[]HŠJBˆÙ[‹˜\ÜÙ\YJX[˜YÙ\‹œİ\
-™[™šY[ŠVÌJBˆÚËY\ÜØYÙHHX[˜YÙ\‹œİ\
-™[›\ÜÈŠBˆÙ[‹˜\ÜÙ\˜[ÙJÚÊBˆÙ[‹˜\ÜÙ\[Š¹.#z ïyd#9¥í¹¢iú(c‹Y\ÜØYÙJBˆX[˜YÙ\‹œİÜ
-
-NÈX[˜YÙ\‹š›Ú[ŠŠB‚ˆYˆ\İÙ^XÚ]Ù^Û\Ú]™WİÚ]Ú\×ÜŞ[[Y]šXÊÙ[ŠN‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-BˆÛÛ™šYÈHÈÛÜšÙ›İÜÈˆÂˆ˜[\ÈˆÈ™^Û\Ú]™WİÚ]ˆÈ›˜\]È—Kœİ\ÈˆÂˆÈšYˆØZ]‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒßW_Kˆ›˜\]ÈˆÈœİ\ÈˆÂˆÈšYˆØZ]‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒ_W_Kˆ_BˆX[˜YÙ\ˆHÛÜšÙ›İÓX[˜YÙ\Š›ÛİÛÛ™šYËİÜ™J›ÛİÈ™‹œÜ[]HŠJBˆÙ[‹˜\ÜÙ\YJX[˜YÙ\‹œİ\
-›˜\]ÈŠVÌJBˆÚËY\ÜØYÙHHX[˜YÙ\‹œİ\
-˜[\ÈŠBˆÙ[‹˜\ÜÙ\˜[ÙJÚÊBˆÙ[‹˜\ÜÙ\[Š¹.#z ïyd#9¥í¹¢iú(c‹Y\ÜØYÙJBˆX[˜YÙ\‹œİÜ
-
-NÈX[˜YÙ\‹š›Ú[ŠŠB‚ˆYˆ\İÙZ[WØ˜]ÚÜ\˜[[Ø[™ÜÙ\šX[
-Ù[ŠN‚ˆYˆ[—Ø˜]Ú
-\˜[[
-N‚ˆ\H[\š[K•[\Ü˜\Q\™XİÜJ
-Bˆ›ÛİH]
-\›˜[YJBˆÛÛ™šYÈHÈÛÜšÙ›İÜÈˆÂˆ˜HˆÈœİ\ÈˆŞÈšYˆ˜H‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒÍ_W_Kˆ˜ˆˆÈœİ\ÈˆŞÈšYˆ˜ˆ‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒÍ_W_Bˆ_BˆX[˜YÙ\ˆHÛÜšÙ›İÓX[˜YÙ\Š›ÛİÛÛ™šYËİÜ™J›ÛİÈ™‹œÜ[]HŠJBˆİ\YH[YK›[Û›İÛšXÊ
-BˆÚËÈHX[˜YÙ\‹œİ\ÙZ[JÈ˜H‹˜ˆ—K\˜[[
-BˆÙ[‹˜\ÜÙ\YJÚÊBˆX[˜YÙ\‹š›Ú[ŠJBˆ[\ÙYH[YK›[Û›İÛšXÊ
-HHİ\YˆÛÛ\]YHX[˜YÙ\‹œİ]J
-VÈ˜˜]Ú—VÈ˜ÛÛ\]Y—Bˆ\˜ÛX[\
-
-Bˆ™]\›ˆ[\ÙYÛÛ\]Y‚ˆÙ\šX[İ[YKÙ\šX[ÙÛ™HH[—Ø˜]Ú
-JBˆ\˜[[İ[YK\˜[[ÙÛ™HH[—Ø˜]Ú
-ŠBˆÙ[‹˜\ÜÙ\Ü™X]\ŠÙ\šX[İ[YKŠBˆÙ[‹˜\ÜÙ\\ÜÊ\˜[[İ[YKÙ\šX[İ[YH
-ˆ
-BˆÙ[‹˜\ÜÙ\\]X[
-ŞÈÛÜšÙ›İÈ—H›Üˆ[ˆÙ\šX[ÙÛ™WKÈ˜H‹˜ˆ—JBˆÙ[‹˜\ÜÙ\YJ[
-Èœİ]\È—HOHœİXØÙ\ÜÈˆ›Üˆ[ˆ\˜[[ÙÛ™JJB‚ˆYˆ\İÙZ[WØ˜]ÚÜÙ[Xİ[Û—Ø[™Û[Z]
-Ù[ŠN‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-BˆÛÛ™šYÈHÈÛÜšÙ›İÜÈˆÂˆ˜HˆÈœİ\ÈˆŞÈšYˆ˜H‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒ_W_Kˆ˜ˆˆÈœİ\ÈˆŞÈšYˆ˜ˆ‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒ_W_KˆœÙ[—İ\İˆÈœİ\ÈˆŞÈšYˆ‹œ[›™\ˆˆ™[^H‹œÙXÛÛ™ÈˆŒ_W_Bˆ_BˆX[˜YÙ\ˆHÛÜšÙ›İÓX[˜YÙ\Š›ÛİÛÛ™šYËİÜ™J›ÛİÈ™‹œÜ[]HŠJBˆÚËÈHX[˜YÙ\‹œİ\ÙZ[JÈ˜ˆ‹œÙ[—İ\İ—KJBˆÙ[‹˜\ÜÙ\YJÚÊBˆX[˜YÙ\‹š›Ú[ŠJBˆ˜]ÚHX[˜YÙ\‹œİ]J
-VÈ˜˜]Ú—BˆÙ[‹˜\ÜÙ\\]X[
-˜]ÚÈ›X^Ü\˜[[—KJBˆÙ[‹˜\ÜÙ\\]X[
-ŞÈÛÜšÙ›İÈ—H›Üˆ[ˆ˜]ÚÈ˜ÛÛ\]Y—WKÈ˜ˆ—JB‚ˆYˆ\İÙ[XZ[Ü™\ÜÜ™\\™\×Ùœ™\ÚÜØÜ™Y[œÚİİÚ]İ]ØÜ™Y[X[ÊÙ[ŠN‚ˆÚ][\š[K•[\Ü˜\Q\™XİÜJ
-H\È\‚ˆ›ÛİH]
-\
-BˆÚİH›ÛİÈœÚİœ™È‚ˆÚİÜš]WØ]\Êˆœ™ÈŠBˆÛÛ™šYÈHÈ™[XZ[Ü™\ÜˆÂˆ™[˜X›YˆYKœ™XÚ\Y[ˆ\İ^[\K˜ÛÛH‹ˆœØÜ™Y[œÚİÈˆÈ™Ø[YHˆİŠÚİ
-_Kˆ\Ù\—Ù[ˆˆ•TÕÔÓUÕTÑTˆ‹œ\ÜİÛÜ™Ù[ˆˆ•TÕÔÓUÔTÔÕÓÔ‘‚ˆKÛÜšÙ›İÜÈˆÈ™Ø[YHˆÈ™\Ü^WÛ˜[YHˆ‘Ø[YHŸ__BˆÚ]]Ú™Xİ
-›ÜË™[š\›Ûˆ‹ßKÛX\UYJN‚ˆÚËY\ÜØYÙHHÙ[™ÙZ[WÜØÜ™Y[œÚİÊˆ›ÛİÛÛ™šYËÈ™Ø[YH—KŞÈÛÜšÙ›İÈˆ™Ø[YH‹œİ]\ÈˆœİXØÙ\ÜÈŸWK
-BˆÙ[‹˜\ÜÙ\˜[ÙJÚÊBˆÙ[‹˜\ÜÙ\[Š¹l&¹§*º+¯¹ïkˆ‹Y\ÜØYÙJB‚‚šYˆ×Û˜[YW×ÈOH—×ÛXZ[—×Èˆ[š]\İ›XZ[Š
-B
+        {"id": "start_blue_archive_emulator", "runner": "ldplayer", "action": "launch", "instance": 3, "timeout": 120, "settle_seconds": 8, "verify_started": true, "verify_timeout": 75, "restart_if_stuck_after": 20, "stuck_restart_delay": 5, "retry": 1},
+        {"id": "wait_for_blue_archive_android", "runner": "adb", "action": "wait", "device": "emulator-5560", "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_baas_daily", "runner": "baas_gui", "executable": "E:\\baas\\baas-pro\\baas.exe", "require_admin": true, "process_images": ["Baas_Windows_V4.exe", "baas.exe"], "log_glob": "E:\\baas\\baas-pro\\runtime\\logs\\*_baas1.log", "device": "emulator-5560", "emulator_kind": "ldplayer", "emulator_instance": 3, "black_screen_watchdog": true, "black_screen_check_interval": 30, "black_screen_timeout": 300, "max_black_screen_restarts": 1, "max_emulator_restarts": 1, "emulator_ready_timeout": 180, "start_markers": ["æ—¥å¿—åˆå§‹åŒ–æˆåŠŸ", "å¼€å§‹æ£€æŸ¥ATX", "æ¨¡æ‹Ÿå™¨è¿æ¥æˆåŠŸ", "å¼€å§‹æ‰§è¡Œã€"], "completion_marker": "ä»»åŠ¡å…¨éƒ¨æ‰§è¡ŒæˆåŠŸ", "error_markers": ["ä»»åŠ¡å…¨éƒ¨æ‰§è¡Œå¤±è´¥"], "ignored_error_markers": ["å…¥åœºåˆ¸ä¸è¶³"], "recoverable_error_markers": ["RestartTaskException: ATXå¡æ­»ï¼Œé‡å¯ä»»åŠ¡", "ATXå¡æ­»ï¼Œå¼€å§‹é‡å¯ATX", "ä»»åŠ¡å¡æ­»ï¼Œå¼€å§‹é‡å¯ä»»åŠ¡", "é‡å¯ä»»åŠ¡ã€"], "max_recoverable_events": 3, "recoverable_retry_seconds": 30, "log_stall_seconds": 300, "log_stall_start_markers": ["å¼€å§‹æ‰§è¡Œã€"], "repeated_probe_recovery_targets": ["normal_task_scan-confirm"], "repeated_probe_threshold": 20, "repeated_probe_recovery_interval": 20, "repeated_probe_recovery_max": 5, "repeated_probe_tap_x": 930, "repeated_probe_tap_y": 540, "require_empty_queue": true, "required_last_task": "å·¥ä½œä»»åŠ¡", "required_task_check_interval": 600, "queue_check_interval": 5, "queue_empty_confirm_seconds": 10, "completion_quiet_seconds": 20, "startup_timeout": 300, "max_start_clicks": 8, "timeout": 14400, "retry": 1, "retry_delay": 15, "close_on_complete": true, "clean_existing": true, "gui_click_fallback": true, "gui_fallback_after": 30, "gui_fallback_retry_seconds": 30, "gui_window_timeout": 120, "gui_profile_x_ratio": 0.04, "gui_profile_y_ratio": 0.15, "gui_click_x_ratio": 0.374, "gui_click_y_ratio": 0.108},
+        {"id": "verify_blue_archive_rewards", "runner": "ba_reward_verify", "device": "emulator-5560", "entry_x_ratio": 0.052, "entry_y_ratio": 0.326, "page_wait": 5, "evidence_path": "G:\\project_I\\logs\\blue_archive_final.png", "timeout": 45},
+        {"id": "blue_archive_final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5560", "path": "G:\\project_I\\logs\\blue_archive_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_blue_archive_emulator", "runner": "ldplayer", "action": "quit", "instance": 3, "timeout": 60, "run_always": true}
+      ]
+    },
+    "azur_lane_daily": {
+      "display_name": "\u78a7\u84dd\u822a\u7ebf\u6bcf\u65e5\u6d41\u7a0b",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "10:00", "enabled": false},
+      "steps": [
+        {"id": "start_azur_lane_emulator", "runner": "mumu_wait", "executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\MuMuManager.exe", "adb_executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\adb.exe", "adb_server_port": 5038, "device": "127.0.0.1:16384", "instance": 0, "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1, "retry_delay": 5},
+        {"id": "run_azur_lane_script", "runner": "alas_gui", "executable": "E:\\AzurLaneAutoScript\\Alas.exe", "process_image": "Alas.exe", "log_glob": "E:\\AzurLaneAutoScript\\log\\*_alas.txt", "env": {"ANDROID_ADB_SERVER_PORT": "5038"}, "device": "127.0.0.1:16384", "adb_executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\adb.exe", "adb_server_port": 5038, "emulator_kind": "mumu", "emulator_manager": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\MuMuManager.exe", "emulator_instance": 0, "black_screen_watchdog": true, "black_screen_check_interval": 30, "black_screen_timeout": 300, "max_black_screen_restarts": 1, "emulator_ready_timeout": 180, "start_markers": ["Scheduler: Start task"], "completion_marker": "No task pending", "error_markers": ["No emulator with serial", "æ— æ³•è¿æ¥è‡³ADBæœåŠ¡", "Request human takeover", "ScriptError", "GameNotRunningError"], "restart_emulator_markers": ["No emulator with serial", "æ— æ³•è¿æ¥è‡³ADBæœåŠ¡", "Request human takeover"], "service_unavailable_markers": ["GameTooManyClickError"], "service_recovery_retry_delay": 60, "maintenance_confirm_count": 2, "next_day_update_wait": 600, "service_unavailable_retry_delay": 600, "completion_quiet_seconds": 20, "log_retry_interval": 30, "max_start_clicks": 5, "startup_timeout": 300, "timeout": 7200, "retry": 2, "retry_delay": 10, "clean_existing": true, "close_on_complete": true, "gui_click_fallback": true, "gui_click_x_ratio": 0.43, "gui_click_y_ratio": 0.105},
+        {"id": "connect_azur_lane_adb", "runner": "command", "command": "E:\\AzurLaneAutoScript\\toolkit\\Lib\\site-packages\\adbutils\\binaries\\adb.exe", "args": ["connect", "127.0.0.1:16384"], "env": {"ANDROID_ADB_SERVER_PORT": "5038"}, "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "azur_lane_final_screenshot", "runner": "adb", "action": "screenshot", "executable": "E:\\AzurLaneAutoScript\\toolkit\\Lib\\site-packages\\adbutils\\binaries\\adb.exe", "adb_server_port": 5038, "device": "127.0.0.1:16384", "path": "G:\\project_I\\logs\\azur_lane_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_azur_lane_emulator", "runner": "command", "command": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\MuMuManager.exe", "args": ["control", "--vmindex", "0", "shutdown"], "timeout": 60, "run_always": true}
+      ]
+    },
+    "naruto_daily": {
+      "display_name": "ç«å½±å¿è€…æ¯æ—¥æµç¨‹",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "11:00", "enabled": false},
+      "steps": [
+        {"id": "start_naruto_emulator", "runner": "ldplayer", "action": "launch", "instance": 0, "timeout": 120, "settle_seconds": 8, "retry": 1},
+        {"id": "wait_for_naruto_android", "runner": "adb", "action": "wait", "device": "emulator-5554", "package": "com.yy.yfs", "require_launcher": true, "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_naruto_shadow", "runner": "naruto_shadow", "device": "emulator-5554", "emulator_kind": "ldplayer", "emulator_instance": 0, "black_screen_watchdog": true, "black_screen_check_interval": 30, "black_screen_timeout": 300, "max_black_screen_restarts": 1, "emulator_ready_timeout": 180, "shadow_package": "com.yy.yfs", "game_package": "com.tencent.KiHan", "shadow_open_confirm": true, "shadow_continue_point": [520, 1118], "shadow_continue_wait": 8, "enable_point": [360, 1215], "enable_retry_timeout": 120, "enable_retry_interval": 10, "enable_precheck_timeout": 4, "enable_confirm_timeout": 15, "enable_confirm_poll_seconds": 2, "enable_confirm_stable_checks": 2, "enable_icon_tolerance": 40, "enable_success_labels": ["åœæ­¢åŠŸèƒ½", "åŠŸèƒ½è¿è¡Œä¸­", "å·²å¯åŠ¨", "å…³é—­åŠŸèƒ½"], "game_consent_point": [530, 1200], "game_consent_wait": 8, "float_start_x": 293, "float_start_y_offset": 49, "orientation_points": {"portrait": {"shadow_continue_point": [520, 1118], "enable_point": [360, 1215], "float_start_x": 293, "float_start_y_offset": 49, "game_consent_point": [530, 1200], "popup_confirm_point": [640, 565]}, "landscape": {"shadow_continue_point": [520, 630], "enable_point": [360, 660], "float_start_x": 293, "float_start_y_offset": 49, "game_consent_point": [817, 600], "popup_confirm_point": [640, 565]}}, "float_control_radius": 30, "float_symbol_min_area": 120, "float_symbol_max_saturation": 80, "float_symbol_min_value": 190, "float_stop_min_fill": 0.68, "float_stop_confirm_timeout": 12, "float_stop_poll_seconds": 2, "float_stop_stable_checks": 2, "popup_confirm_point": [640, 565], "privacy_evidence_path": "G:\\project_I\\logs\\naruto_privacy_prompt.png", "update_evidence_path": "G:\\project_I\\logs\\naruto_update_prompt.png", "lobby_reference_paths": ["G:\\project_I\\logs\\naruto_activity_check.png", "G:\\project_I\\logs\\daily_evidence\\2026-07-21\\082911\\naruto_daily_success.png"], "lobby_icon_threshold": 0.50, "lobby_icon_min_matches": 3, "app_launch_timeout": 90, "start_retry_interval": 15, "start_retry_timeout": 240, "float_menu_wait": 2, "after_start_click_wait": 5, "screenshot_interval": 60, "initial_lobby_timeout": 1800, "stage1_wrong_foreground_checks": 2, "one_hour_seconds": 5400, "close_after_lobby_timer": true, "timeout": 21600},
+        {"id": "naruto_final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5554", "path": "G:\\project_I\\logs\\naruto_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_naruto_emulator", "runner": "ldplayer", "action": "quit", "instance": 0, "timeout": 60, "run_always": true}
+      ]
+    },
+    "gumballs_daily": {
+      "display_name": "ä¸æ€è®®è¿·å®«æ¯æ—¥æµç¨‹",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "12:00", "enabled": false},
+      "steps": [
+        {"id": "start_gumballs_emulator", "runner": "ldplayer", "action": "launch", "instance": 2, "timeout": 120, "settle_seconds": 8, "retry": 1},
+        {"id": "wait_for_gumballs_android", "runner": "adb", "action": "wait", "device": "emulator-5558", "timeout": 180, "poll_seconds": 2, "settle_seconds": 3, "retry": 1},
+        {"id": "run_gumballs_twice", "runner": "gumballs_gui", "executable": "D:\\bushiyi\\MFAAvalonia.exe", "process_image": "MFAAvalonia.exe", "log_glob": "D:\\bushiyi\\logs\\log-*.log", "device": "emulator-5558", "emulator_kind": "ldplayer", "emulator_instance": 2, "black_screen_watchdog": true, "black_screen_check_interval": 30, "black_screen_timeout": 300, "max_black_screen_restarts": 1, "emulator_ready_timeout": 180, "initial_click_delay": 120, "round_start_timeout": 180, "start_click_retry_interval": 30, "max_start_click_attempts": 3, "between_round_delay": 3, "start_marker": "ç”¨æˆ·æ“ä½œï¼šå¯åŠ¨ä»»åŠ¡", "completion_marker": "ä»»åŠ¡å·²å…¨éƒ¨å®Œæˆï¼", "business_silence_timeout": 600, "max_stalled_retries": 1, "stalled_restart_delay": 5, "stalled_relaunch_wait": 5, "gui_ready_timeout": 60, "gui_ready_retry_interval": 2, "gui_click_x_ratio": 0.963, "gui_click_y_ratio": 0.136, "timeout": 14400, "clean_existing": true, "close_on_complete": true},
+        {"id": "gumballs_final_screenshot", "runner": "adb", "action": "screenshot", "device": "emulator-5558", "path": "G:\\project_I\\logs\\gumballs_final.png", "timeout": 30, "continue_on_error": true, "run_always": true},
+        {"id": "stop_gumballs_emulator", "runner": "ldplayer", "action": "quit", "instance": 2, "timeout": 60, "run_always": true}
+      ]
+    },
+    "endfield_daily": {
+      "display_name": "ç»ˆæœ«åœ°æ¯æ—¥æµç¨‹",
+      "exclusive_group": "pc_hoyoverse_daily",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "13:00", "enabled": false},
+      "steps": [
+        {"id": "run_endfield_daily", "runner": "maaend_gui", "executable": "G:\\maazmd\\MaaEnd.exe", "process_image": "MaaEnd.exe", "log_glob": "G:\\maazmd\\debug\\20??-??-??-*.log", "framework_log_path": "G:\\maazmd\\debug\\maafw.log", "framework_stall_seconds": 1800, "failed_settle_seconds": 45, "credit_menu_recovery_after": 6, "credit_menu_recovery_interval": 5, "credit_menu_recovery_max": 3, "credit_menu_x_ratio": 0.97, "credit_menu_y_ratio": 0.056, "daily_action_failure_recovery": true, "daily_action_recovery_max": 1, "daily_action_x_ratio": 0.893, "daily_action_y_ratio": 0.917, "start_markers": ["æ‰‹åŠ¨å¯åŠ¨ï¼šæ¿€æ´»é…ç½®å¹¶å¯åŠ¨ä»»åŠ¡: å…¨å¥—æ—¥å¸¸", "å®ä¾‹ å…¨å¥—æ—¥å¸¸: å¼€å§‹æ‰§è¡Œä»»åŠ¡"], "completion_marker": "å®ä¾‹ å…¨å¥—æ—¥å¸¸: æ”¶å°¾æ®µåˆ‡æ¢ä¸º Dummy Controller", "final_submission_marker": "å®ä¾‹ å…¨å¥—æ—¥å¸¸: ä»»åŠ¡å·²æäº¤, task_ids:", "bring_game_to_front": true, "game_process_image": "Endfield.exe", "game_title_contains": "Endfield", "game_foreground_timeout": 180, "screenshot_path": "G:\\project_I\\logs\\endfield_final.png", "screenshot_wait_seconds": 0, "gui_click_fallback": true, "gui_fallback_after": 45, "gui_click_x_ratio": 0.682, "gui_click_y_ratio": 0.971, "timeout": 10800, "retry": 2, "retry_delay": 15, "clean_existing": true, "close_on_complete": false},
+        {"id": "stop_endfield_game", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "Endfield.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true},
+        {"id": "stop_maaend", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "MaaEnd.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true}
+      ]
+    },
+    "zenless_daily": {
+      "display_name": "ç»åŒºé›¶æ¯æ—¥æµç¨‹",
+      "exclusive_group": "pc_hoyoverse_daily",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "14:00", "enabled": false},
+      "steps": [
+        {"id": "run_zenless_daily", "runner": "log_gui_daily", "display_name": "ç»åŒºé›¶ä¸€æ¡é¾™", "executable": "E:\\onedragen\\ZZZ\\OneDragon-Launcher.exe", "log_glob": "E:\\onedragen\\ZZZ\\.log\\log.txt", "process_images": ["OneDragon-Launcher.exe"], "cleanup_process_images": ["OneDragon-Launcher.exe"], "title_hints": ["ç»åŒºé›¶ ä¸€æ¡é¾™", "ZenlessZoneZero-OneDragon"], "button_names": ["å¯åŠ¨ä¸€æ¡é¾™"], "gui_click_x_ratio": 0.88, "gui_click_y_ratio": 0.92, "initial_click_delay": 8, "log_retry_interval": 30, "gui_ready_timeout": 300, "start_markers": ["æŒ‡ä»¤[ ä¸€æ¡é¾™ ] èŠ‚ç‚¹ æ£€æµ‹æ¸¸æˆçª—å£", "æŒ‡ä»¤[ æ‰§è¡Œåº”ç”¨ç»„ one_dragon ] èŠ‚ç‚¹ æ£€æµ‹æ¸¸æˆçª—å£"], "completion_markers": ["æŒ‡ä»¤[ ä¸€æ¡é¾™ ] æ‰§è¡ŒæˆåŠŸ è¿”å›çŠ¶æ€ å…¨éƒ¨ç»“æŸ"], "error_markers": ["æŒ‡ä»¤[ ä¸€æ¡é¾™ ] æ‰§è¡Œå¤±è´¥"], "screenshot_markers": ["è¿”å›çŠ¶æ€ æ´»è·ƒåº¦å·²æ»¡", "è¿”å›çŠ¶æ€ æ—¥å¸¸å¥–åŠ±é¢†å–æˆåŠŸ"], "state_watchdog_regex": "æŒ‡ä»¤\\[\\s*([^\\]]+)\\s*\\]\\s*èŠ‚ç‚¹\\s*(.*?)\\s*->.*?è¿”å›çŠ¶æ€\\s*(.*)$", "state_stall_seconds": 180, "state_stall_overrides": {"^ç©ºæ´æ“ä½œå™¨ \\|": 900}, "state_recovery_seconds": 60, "targeted_state_recovery_regex": "^å‡ºæˆ˜ \\| æ£€æµ‹æ¸¸æˆçª—å£ \\| æŒ‰é’®-å‡ºæˆ˜$", "targeted_state_recovery_after": 45, "targeted_state_recovery_interval": 45, "targeted_state_recovery_max": 3, "targeted_state_recovery_clicks": [[0.48, 0.14, 1.2], [0.906, 0.957, 1.0]], "screenshot_path": "G:\\project_I\\logs\\zenless_final.png", "bring_game_to_front": true, "game_process_image": "ZenlessZoneZero.exe", "game_title_contains": "ç»åŒºé›¶", "game_foreground_timeout": 180, "completion_quiet_seconds": 3, "timeout": 14400, "retry": 1, "retry_delay": 10, "clean_existing": true, "close_on_complete": true},
+        {"id": "stop_zenless_game", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "ZenlessZoneZero.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true}
+      ]
+    },
+    "star_rail_daily": {
+      "display_name": "æ˜Ÿç©¹é“é“æ¯æ—¥æµç¨‹",
+      "exclusive_group": "pc_hoyoverse_daily",
+      "once_per_day": true,
+      "trigger": {"type": "daily", "time": "15:00", "enabled": false},
+      "steps": [
+        {"id": "run_star_rail_daily", "runner": "log_gui_daily", "display_name": "æ˜Ÿç©¹é“é“å®Œæ•´è¿è¡Œ", "executable": "E:\\March7thAssistant_full\\March7th Launcher.exe", "log_glob": "E:\\March7thAssistant_full\\logs\\*.log", "process_images": ["March7th Launcher.exe", "March7th Assistant.exe"], "cleanup_process_images": ["March7th Launcher.exe", "March7th Assistant.exe"], "completion_on_worker_exit": ["March7th Assistant.exe"], "worker_exit_requires_evidence": true, "worker_exit_log_grace": 15, "title_hints": ["March7th", "ä¸‰æœˆä¸ƒ"], "button_names": ["å®Œæ•´è¿è¡Œ"], "gui_click_x_ratio": 0.165, "gui_click_y_ratio": 0.82, "initial_click_delay": 8, "log_retry_interval": 30, "max_start_clicks": 20, "start_markers": ["å¼€å§‹è¿è¡Œ", "æ¸¸æˆå¯åŠ¨ï¼š"], "completion_markers": ["æ¯æ—¥å®è®­å·²å®Œæˆ", "æ¯æ—¥å®è®­å¥–åŠ±å®Œæˆ"], "error_markers": ["å®Œæ•´è¿è¡Œå¤±è´¥", "è¿è¡Œå¼‚å¸¸ç»ˆæ­¢", "Traceback (most recent call last)"], "update_markers": ["GitHub å‘ç°æ–°ç‰ˆæœ¬", "å‘ç°æ–°ç‰ˆæœ¬", "å­˜åœ¨æ–°ç‰ˆæœ¬", "éœ€è¦æ›´æ–°åç»§ç»­", "è¯·æ›´æ–°"], "screenshot_markers": ["æ¯æ—¥å®è®­å·²å®Œæˆ", "æ¯æ—¥å®è®­å¥–åŠ±å®Œæˆ"], "screenshot_path": "G:\\project_I\\logs\\star_rail_final.png", "bring_game_to_front": true, "game_process_image": "StarRail.exe", "game_title_contains": "å´©åï¼šæ˜Ÿç©¹é“é“", "game_foreground_timeout": 180, "completion_quiet_seconds": 3, "timeout": 14400, "retry": 1, "retry_delay": 10, "clean_existing": true, "close_on_complete": true},
+        {"id": "stop_star_rail_game", "runner": "command", "command": "C:\\Windows\\System32\\taskkill.exe", "args": ["/IM", "StarRail.exe", "/T", "/F"], "success_exit_codes": [0, 128], "timeout": 60, "continue_on_error": true, "run_always": true}
+      ]
+    },
+    "self_test": {
+      "display_name": "ç¨‹åºè‡ªæ£€",
+      "once_per_day": false,
+      "trigger": {"enabled": false},
+      "steps": [
+        {"id": "short_wait", "runner": "delay", "seconds": 0.2},
+        {"id": "python_check", "runner": "command", "command": "python", "args": ["--version"], "timeout": 10}
+      ]
+    }
+  }
+}
