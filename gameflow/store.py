@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .daily import operational_day, parse_timestamp
+
 
 class Store:
     def __init__(self, path: Path):
@@ -23,6 +25,10 @@ class Store:
                 step_id TEXT NOT NULL, runner TEXT NOT NULL, status TEXT NOT NULL,
                 attempt INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,
                 message TEXT DEFAULT '', details TEXT DEFAULT '{}')""")
+            db.execute("""CREATE TABLE IF NOT EXISTS workflow_flags (
+                workflow TEXT NOT NULL, flag_key TEXT NOT NULL,
+                flag_value TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY (workflow, flag_key))""")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10)
@@ -52,17 +58,90 @@ class Store:
                        (run_id, step["id"], step["runner"], status, attempt, started,
                         self.now(), message, json.dumps(details or {}, ensure_ascii=False)))
 
+    def set_workflow_flag(self, workflow: str, key: str, value: Any) -> None:
+        payload = json.dumps(value, ensure_ascii=False)
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO workflow_flags(workflow,flag_key,flag_value,updated_at)
+                       VALUES(?,?,?,?) ON CONFLICT(workflow,flag_key) DO UPDATE SET
+                       flag_value=excluded.flag_value,updated_at=excluded.updated_at""",
+                       (workflow, key, payload, self.now()))
+
+    def get_workflow_flag(self, workflow: str, key: str, default: Any = None) -> Any:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT flag_value FROM workflow_flags WHERE workflow=? AND flag_key=?",
+                (workflow, key)).fetchone()
+        if row is None:
+            return default
+        try:
+            return json.loads(row["flag_value"])
+        except (TypeError, json.JSONDecodeError):
+            return default
+
+    def delete_workflow_flag(self, workflow: str, key: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM workflow_flags WHERE workflow=? AND flag_key=?",
+                       (workflow, key))
+
     def recent(self, limit: int = 30) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    def completed_today(self, workflow: str) -> bool:
-        today = datetime.now().astimezone().date().isoformat()
+    def completed_today(self, workflow: str, now: datetime | None = None) -> bool:
+        """Whether the workflow succeeded in the current 04:00-based game day."""
+        today = operational_day(now)
         with self._connect() as db:
-            row = db.execute("SELECT 1 FROM runs WHERE workflow=? AND status='success' AND substr(started_at,1,10)=? LIMIT 1",
-                             (workflow, today)).fetchone()
-        return row is not None
+            rows = db.execute(
+                "SELECT started_at FROM runs WHERE workflow=? AND status='success' ORDER BY id DESC",
+                (workflow,)).fetchall()
+        for row in rows:
+            started = parse_timestamp(row["started_at"])
+            if started is not None and operational_day(started) == today:
+                return True
+        return False
+
+    def daily_run_statuses(self, workflows: list[str] | set[str] | tuple[str, ...],
+                           now: datetime | None = None) -> dict[str, dict[str, Any]]:
+        """Return each workflow's status for the current 04:00-based game day."""
+        names = list(dict.fromkeys(str(name) for name in workflows))
+        result = {
+            name: {"status": "pending", "completed": False, "message": "今日尚未完成",
+                   "started_at": None, "finished_at": None}
+            for name in names
+        }
+        if not names:
+            return result
+        placeholders = ",".join("?" for _ in names)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM runs WHERE workflow IN ({placeholders}) ORDER BY id DESC",
+                names).fetchall()
+        today = operational_day(now)
+        latest: dict[str, dict[str, Any]] = {}
+        successful: dict[str, dict[str, Any]] = {}
+        for raw in rows:
+            row = dict(raw)
+            name = str(row["workflow"])
+            started = parse_timestamp(row.get("started_at"))
+            if started is None or operational_day(started) != today:
+                continue
+            latest.setdefault(name, row)
+            if row.get("status") == "success":
+                successful.setdefault(name, row)
+        for name in names:
+            row = successful.get(name) or latest.get(name)
+            if row is None:
+                continue
+            status = str(row.get("status") or "pending")
+            result[name] = {
+                "status": status,
+                "completed": bool(successful.get(name)),
+                "message": str(row.get("message") or ""),
+                "started_at": row.get("started_at"),
+                "finished_at": row.get("finished_at"),
+            }
+        return result
 
     def recover_interrupted_runs(self) -> int:
         """Mark runs abandoned by a previous GameFlow process as interrupted."""
