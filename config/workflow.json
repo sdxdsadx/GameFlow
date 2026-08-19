@@ -523,174 +523,63 @@
                     "retry": 1
                 },
                 {
-                    "id": "run_naruto_shadow",
-                    "runner": "naruto_shadow",
+                    "id": "run_maa_auto_naruto",
+                    "runner": "log_gui_daily",
+                    "display_name": "MaaAutoNaruto \u706b\u5f71\u65e5\u5e38",
+                    "executable": "G:\\maahuo\\MFAAvalonia.exe",
+                    "process_images": [
+                        "MFAAvalonia.exe"
+                    ],
+                    "cleanup_process_images": [
+                        "MFAAvalonia.exe"
+                    ],
+                    "title_hints": [
+                        "MFA \u4efb\u52a1\u7ba1\u7406\u5668",
+                        "MaaAutoNaruto"
+                    ],
+                    "button_names": [
+                        "\u5f00\u59cb\u4efb\u52a1"
+                    ],
+                    "gui_click_x_ratio": 0.939,
+                    "gui_click_y_ratio": 0.12,
+                    "initial_click_delay": 8,
+                    "startup_ack_button_names": [
+                        "\u786e\u8ba4"
+                    ],
+                    "startup_ack_x_ratio": 0.5,
+                    "startup_ack_y_ratio": 0.948,
+                    "startup_ack_after": 3,
+                    "startup_ack_settle_seconds": 2,
+                    "startup_ack_retry_interval": 3,
+                    "max_startup_ack_clicks": 3,
+                    "log_glob": "G:\\maahuo\\logs\\log-*.log",
+                    "start_markers": [
+                        "\u5f00\u59cb\u4efb\u52a1\uff1a\u8fdb\u5165\u706b\u5f71",
+                        "\u706b\u5f71\u5fcd\u8005\uff0c\u542f\u52a8\uff01"
+                    ],
+                    "completion_markers": [
+                        "\u4efb\u52a1\u5df2\u5168\u90e8\u5b8c\u6210\uff01"
+                    ],
+                    "error_markers": [
+                        "\u4efb\u52a1\u6267\u884c\u5931\u8d25",
+                        "\u6267\u884c\u5931\u8d25",
+                        "\u4efb\u52a1\u4e2d\u65ad"
+                    ],
+                    "timeout": 21600,
+                    "retry": 1,
+                    "retry_delay": 10,
+                    "clean_existing": true,
+                    "close_on_complete": true
+                },
+                {
+                    "id": "verify_naruto_rewards",
+                    "runner": "naruto_reward_verify",
                     "device": "emulator-5554",
-                    "emulator_kind": "ldplayer",
-                    "emulator_instance": 0,
-                    "black_screen_watchdog": true,
-                    "black_screen_check_interval": 30,
-                    "black_screen_timeout": 300,
-                    "max_black_screen_restarts": 1,
-                    "emulator_ready_timeout": 180,
-                    "shadow_package": "com.yy.yfs",
-                    "game_package": "com.tencent.KiHan",
-                    "shadow_open_confirm": true,
-                    "shadow_continue_point": [
-                        520,
-                        1118
-                    ],
-                    "shadow_continue_wait": 8,
-                    "max_shadow_continue_clicks": 16,
-                    "enable_point": [
-                        360,
-                        1215
-                    ],
-                    "enable_retry_timeout": 120,
-                    "enable_retry_interval": 10,
-                    "max_enable_clicks": 12,
-                    "enable_precheck_timeout": 4,
-                    "enable_confirm_timeout": 15,
-                    "enable_confirm_poll_seconds": 2,
-                    "enable_confirm_stable_checks": 2,
-                    "enable_icon_tolerance": 40,
-                    "enable_success_labels": [
-                        "\u505c\u6b62\u529f\u80fd",
-                        "\u529f\u80fd\u8fd0\u884c\u4e2d",
-                        "\u5df2\u542f\u52a8",
-                        "\u5173\u95ed\u529f\u80fd"
-                    ],
-                    "game_consent_point": [
-                        530,
-                        1200
-                    ],
-                    "game_consent_wait": 8,
-                    "max_game_consent_clicks": 3,
-                    "game_anr_wait_seconds": 8,
-                    "max_game_anr_wait_clicks": 5,
-                    "game_qq_consent_wait": 8,
-                    "max_game_qq_consent_clicks": 3,
-                    "game_login_retry_wait": 12,
-                    "float_start_x": 293,
-                    "float_start_y_offset": 49,
-                    "max_start_clicks": 16,
-                    "max_float_start_clicks": 16,
-                    "orientation_points": {
-                        "portrait": {
-                            "shadow_continue_point": [
-                                520,
-                                1118
-                            ],
-                            "shadow_update_confirm_point": [
-                                480,
-                                828
-                            ],
-                            "enable_point": [
-                                360,
-                                1215
-                            ],
-                            "float_start_x": 293,
-                            "float_start_y_offset": 49,
-                            "game_consent_point": [
-                                530,
-                                1200
-                            ],
-                            "popup_confirm_point": [
-                                360,
-                                935
-                            ]
-                        },
-                        "landscape": {
-                            "shadow_continue_point": [
-                                520,
-                                630
-                            ],
-                            "shadow_authorization_continue_point": [
-                                922,
-                                556
-                            ],
-                            "shadow_update_confirm_point": [
-                                760,
-                                500
-                            ],
-                            "enable_point": [
-                                360,
-                                660
-                            ],
-                            "float_start_x": 293,
-                            "float_start_y_offset": 0,
-                            "game_consent_point": [
-                                817,
-                                600
-                            ],
-                            "popup_confirm_point": [
-                                640,
-                                515
-                            ]
-                        }
-                    },
-                    "float_control_radius": 30,
-                    "float_symbol_min_area": 120,
-                    "float_symbol_max_saturation": 80,
-                    "float_symbol_min_value": 190,
-                    "float_stop_min_fill": 0.68,
-                    "float_stop_confirm_timeout": 12,
-                    "float_stop_poll_seconds": 2,
-                    "float_stop_stable_checks": 2,
-                    "collapsed_stop_core_radius": 14,
-                    "collapsed_stop_max_saturation": 80,
-                    "collapsed_stop_min_value": 190,
-                    "collapsed_stop_min_core_ratio": 0.75,
-                    "popup_confirm_point": [
-                        640,
-                        515
-                    ],
-                    "ignored_update_markers": [
-                        "\u5f53\u524d\u8f6f\u4ef6\u4e0d\u662f\u6700\u65b0\u7248"
-                    ],
-                    "shadow_update_grace_versions": 3,
-                    "shadow_update_popup_close_wait": 12,
-                    "shadow_update_confirm_point": [
-                        760,
-                        500
-                    ],
-                    "update_markers": [
-                        "\u5f53\u524d\u7248\u672c\u8fc7\u4f4e\uff0c\u8bf7\u66f4\u65b0\u81f3\u6700\u65b0\u7248\u672c\u540e\u91cd\u8bd5",
-                        "\u8be5\u7248\u672c\u5df2\u505c\u6b62\u4f7f\u7528\uff0c\u8bf7\u524d\u5f80\u5e94\u7528\u5546\u5e97\u4e0b\u8f7d\u6700\u65b0\u7248\u672c"
-                    ],
-                    "maintenance_markers": [
-                        "\u670d\u52a1\u5668\u6b63\u5728\u7ef4\u62a4\u4e2d\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5",
-                        "\u505c\u670d\u7ef4\u62a4\u4e2d\uff0c\u5f00\u670d\u65f6\u95f4\u8bf7\u5173\u6ce8\u5b98\u65b9\u516c\u544a"
-                    ],
-                    "next_day_update_wait": 600,
-                    "privacy_evidence_path": "G:\\project_I\\logs\\naruto_privacy_prompt.png",
-                    "update_evidence_path": "G:\\project_I\\logs\\naruto_update_prompt.png",
-                    "lobby_reference_paths": [
-                        "G:\\project_I\\logs\\naruto_activity_check.png",
-                        "G:\\project_I\\logs\\daily_evidence\\2026-07-21\\082911\\naruto_daily_success.png"
-                    ],
-                    "lobby_icon_threshold": 0.5,
-                    "lobby_icon_min_matches": 3,
-                    "lobby_role_name_check": true,
-                    "lobby_role_name_threshold": 0.62,
-                    "lobby_role_mismatch_evidence_path": "G:\\project_I\\logs\\naruto_role_mismatch.png",
-                    "app_launch_timeout": 90,
-                    "start_retry_interval": 15,
-                    "start_retry_timeout": 240,
-                    "float_menu_wait": 2,
-                    "after_start_click_wait": 5,
-                    "screenshot_interval": 60,
-                    "initial_lobby_timeout": 1800,
-                    "max_stage1_popup_dismissals": 3,
-                    "stage1_wrong_foreground_checks": 5,
-                    "stage1_game_launch_wait": 12,
-                    "stage1_login_page_wait": 8,
-                    "max_login_method_clicks": 2,
-                    "max_server_start_clicks": 3,
-                    "server_start_wait": 10,
-                    "one_hour_seconds": 5400,
-                    "close_after_lobby_timer": true,
-                    "timeout": 21600
+                    "reward_x_ratio": 0.9609,
+                    "reward_y_ratio": 0.5042,
+                    "page_wait": 5,
+                    "evidence_path": "G:\\project_I\\logs\\naruto_activity_check.png",
+                    "timeout": 60
                 },
                 {
                     "id": "naruto_final_screenshot",
