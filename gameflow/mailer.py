@@ -82,14 +82,24 @@ def send_daily_screenshots(root: Path, config: dict[str, Any], selected: list[st
     if not recipient:
         return False, "邮件收件地址为空"
     labels = {name: wf.get("display_name", name) for name, wf in config.get("workflows", {}).items()}
-    status_lines = [f"{labels.get(item['workflow'], item['workflow'])}: {item['status']}"
-                    for item in completed if item["workflow"] in selected]
+    status_lines = []
+    for item in completed:
+        if item["workflow"] not in selected:
+            continue
+        label = labels.get(item["workflow"], item["workflow"])
+        if item.get("retried"):
+            status_lines.append(
+                f"{label}: 第一轮 {item.get('first_status', 'unknown')} → "
+                f"第二轮 {item['status']}")
+        else:
+            status_lines.append(f"{label}: 第一轮 {item['status']}（无需重试）")
     message = EmailMessage()
     message["From"] = user
     message["To"] = recipient
     message["Subject"] = f"每日游戏流程截图 {datetime.now().astimezone():%Y-%m-%d %H:%M}"
-    message.set_content("每日游戏流程已结束。\n\n" + "\n".join(status_lines) +
-                        "\n\n附件为本批流程结束前保存的游戏内截图。")
+    message.set_content("每日游戏流程及失败任务自动重试已结束。\n\n" +
+                        "\n".join(status_lines) +
+                        "\n\n附件为两轮结束后保留的最终游戏内截图。")
     for filename, content, subtype in attachments:
         message.add_attachment(content, maintype="image", subtype=subtype, filename=filename)
     host = str(settings.get("smtp_host", "smtp.qq.com"))

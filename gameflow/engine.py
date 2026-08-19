@@ -123,7 +123,8 @@ class Engine:
                                 attempt, started, last.message, last.details)
             if last.success:
                 return last
-            if last.status in ("skipped", "needs_update"):
+            if (last.status in ("skipped", "needs_update", "cancelled")
+                    or last.details.get("retryable") is False):
                 return last
             should_retry = False
             if (emulator_restart and last.details.get("emulator_restart_success")
@@ -149,6 +150,7 @@ class Engine:
         run_id = self.store.start_run(workflow, trigger)
         ctx = RunContext(self.root, self.config, self.log, self._stop)
         status, message, failed = "success", "正常结束", False
+        cleanup_errors: list[str] = []
         try:
             update_flag = self.store.get_workflow_flag(workflow, "update_before_next_day")
             current_day = operational_day()
@@ -159,18 +161,32 @@ class Engine:
                 step = dict(configured_step)
                 if failed and not step.get("run_always"):
                     continue
-                if update_wait_pending and step.get("runner") == "alas_gui":
+                supports_update_wait = bool(
+                    step.get("supports_startup_update_wait")
+                    or step.get("runner") in {
+                        "maa_gui", "baas_gui", "alas_gui", "naruto_shadow",
+                        "gumballs_gui", "maaend_gui", "log_gui_daily",
+                    })
+                update_wait_injected = bool(update_wait_pending and supports_update_wait)
+                if update_wait_injected:
                     step["startup_update_wait"] = float(
                         update_flag.get("wait_seconds", 600))
-                    self.store.delete_workflow_flag(workflow, "update_before_next_day")
-                    update_wait_pending = False
                 self._update(step=step["id"])
-                result = self._execute_step(run_id, workflow, step, ctx)
+                # A user's stop request must not prevent run_always screenshots
+                # and process cleanup from running.  Give those short, bounded
+                # cleanup steps a fresh event while keeping the Engine stop flag
+                # authoritative for the final workflow status.
+                step_ctx = ctx
+                if step.get("run_always") and self._stop.is_set():
+                    step_ctx = RunContext(
+                        self.root, self.config, self.log, threading.Event())
+                result = self._execute_step(run_id, workflow, step, step_ctx)
+                if (update_wait_injected
+                        and step.get("_startup_update_wait_consumed")):
+                    self.store.delete_workflow_flag(
+                        workflow, "update_before_next_day")
+                    update_wait_pending = False
                 if not result.success:
-                    if step.get("continue_on_error"):
-                        self.log(f"步骤 {step['id']} 未成功但已按配置忽略：{result.message}")
-                        continue
-                    failed = True
                     if result.details.get("defer_update_next_day"):
                         self.store.set_workflow_flag(
                             workflow, "update_before_next_day",
@@ -178,6 +194,20 @@ class Engine:
                              "wait_seconds": float(result.details.get(
                                  "next_day_update_wait", 600)),
                              "reason": result.message})
+                    special_status = result.status in {
+                        "skipped", "needs_update", "cancelled",
+                    }
+                    if failed and step.get("run_always"):
+                        cleanup_errors.append(
+                            f"{step['id']}：{result.message}")
+                        self.log(
+                            f"清理步骤 {step['id']} 未成功，保留原始失败原因："
+                            f"{result.message}")
+                        continue
+                    if step.get("continue_on_error") and not special_status:
+                        self.log(f"步骤 {step['id']} 未成功但已按配置忽略：{result.message}")
+                        continue
+                    failed = True
                     status = ("cancelled" if self._stop.is_set() else
                               (result.status or "failed"))
                     ending = {
@@ -192,6 +222,8 @@ class Engine:
             if self._stop.is_set():
                 status = "cancelled"
                 message = "任务已由用户取消"
+            if cleanup_errors:
+                message += "；清理警告：" + "；".join(cleanup_errors)
             self.store.finish_run(run_id, status, message)
             self._update(running=False, workflow=workflow, step=None, message=message,
                          last_status=status, last_finished=self.store.now())
@@ -307,7 +339,9 @@ class WorkflowManager:
                     force: bool = False) -> tuple[bool, str]:
         selected = []
         for name in workflows:
-            if name in self.engines and name not in selected and name != "self_test":
+            workflow_config = self.config["workflows"].get(name, {})
+            if (name in self.engines and name not in selected and name != "self_test"
+                    and not workflow_config.get("test_only", False)):
                 selected.append(name)
         if not selected:
             return False, "请至少选择一个每日任务"
@@ -332,65 +366,147 @@ class WorkflowManager:
                          for name in selected]
         omitted = [wf.get("display_name", name)
                    for name, wf in self.config["workflows"].items()
-                   if name not in selected and name != "self_test"]
+                   if (name not in selected and name != "self_test"
+                       and not wf.get("test_only", False))]
         logging.getLogger("gameflow").info(
             "本轮每日流程已选择：%s；未选择：%s；最多并行：%d",
             "、".join(display_names), "、".join(omitted) or "无", max_parallel)
-        pending = list(selected)
-        active: dict[str, Engine] = {}
-        completed: list[dict[str, str]] = []
-        while pending or active:
-            if self._batch_stop.is_set():
-                for engine in active.values():
-                    engine.stop()
-                for engine in active.values():
-                    engine.join()
-                break
+        retry_settings = self.config.get("daily_retry", {})
+        retry_enabled = bool(retry_settings.get("enabled", True))
+        retryable_statuses = {
+            str(value) for value in retry_settings.get(
+                "statuses", ["failed", "interrupted"])
+        }
+        all_round_results: list[dict[str, Any]] = []
 
-            # Apply individual cancellation requests before starting more work.
-            # ``cancel`` also updates the public snapshot immediately; mirror the
-            # cancellation into the batch thread's authoritative local lists.
-            with self._lock:
-                cancelled = set(self._batch_cancelled)
-            for name in list(pending):
-                if name in cancelled:
-                    pending.remove(name)
-                    if not any(item["workflow"] == name for item in completed):
-                        completed.append({"workflow": name, "status": "cancelled",
-                                          "message": "任务已由用户取消"})
-            for name, engine in list(active.items()):
-                if name in cancelled and engine.state()["running"]:
-                    engine.stop()
-            while pending and len(active) < max_parallel:
-                candidate_index = next((index for index, candidate in enumerate(pending)
-                                        if not self._exclusive_conflict(candidate, list(active))), None)
-                if candidate_index is None:
+        def run_round(names: list[str], round_number: int,
+                      round_force: bool) -> list[dict[str, Any]]:
+            pending = list(names)
+            active: dict[str, Engine] = {}
+            round_completed: list[dict[str, Any]] = []
+            trigger = "daily_batch" if round_number == 1 else "daily_batch_retry"
+            while pending or active:
+                if self._batch_stop.is_set():
+                    for engine in active.values():
+                        engine.stop()
+                    for engine in active.values():
+                        engine.join()
+                    for name, engine in list(active.items()):
+                        state = engine.state()
+                        round_completed.append({
+                            "workflow": name,
+                            "status": state.get("last_status", "cancelled"),
+                            "message": state.get("message", "任务已停止"),
+                            "round": round_number,
+                        })
+                    active.clear()
                     break
-                name = pending.pop(candidate_index)
-                ok, message = self.engines[name].start(name, "daily_batch", force)
-                if ok:
-                    active[name] = self.engines[name]
-                    # cancel() may have raced with Engine.start() while the item
-                    # was moving from pending to active.
-                    with self._lock:
-                        cancel_after_start = name in self._batch_cancelled
-                    if cancel_after_start:
-                        self.engines[name].stop()
-                else:
-                    completed.append({"workflow": name, "status": "skipped", "message": message})
-            finished = []
-            for name, engine in active.items():
-                state = engine.state()
-                if not state["running"]:
-                    completed.append({"workflow": name, "status": state.get("last_status", "failed"),
-                                      "message": state.get("message", "")})
-                    finished.append(name)
-            for name in finished:
-                active.pop(name)
+
+                # Apply individual cancellation requests before starting more work.
+                with self._lock:
+                    cancelled = set(self._batch_cancelled)
+                for name in list(pending):
+                    if name in cancelled:
+                        pending.remove(name)
+                        if not any(item["workflow"] == name for item in round_completed):
+                            round_completed.append({
+                                "workflow": name, "status": "cancelled",
+                                "message": "任务已由用户取消", "round": round_number,
+                            })
+                for name, engine in list(active.items()):
+                    if name in cancelled and engine.state()["running"]:
+                        engine.stop()
+                while pending and len(active) < max_parallel:
+                    candidate_index = next((
+                        index for index, candidate in enumerate(pending)
+                        if not self._exclusive_conflict(candidate, list(active))
+                    ), None)
+                    if candidate_index is None:
+                        break
+                    name = pending.pop(candidate_index)
+                    ok, start_message = self.engines[name].start(
+                        name, trigger, round_force)
+                    if ok:
+                        active[name] = self.engines[name]
+                        with self._lock:
+                            cancel_after_start = name in self._batch_cancelled
+                        if cancel_after_start:
+                            self.engines[name].stop()
+                    else:
+                        round_completed.append({
+                            "workflow": name, "status": "skipped",
+                            "message": start_message, "round": round_number,
+                        })
+                finished = []
+                for name, engine in active.items():
+                    state = engine.state()
+                    if not state["running"]:
+                        round_completed.append({
+                            "workflow": name,
+                            "status": state.get("last_status", "failed"),
+                            "message": state.get("message", ""),
+                            "round": round_number,
+                        })
+                        finished.append(name)
+                for name in finished:
+                    active.pop(name)
+                published = [*all_round_results, *round_completed]
+                round_label = "第一轮" if round_number == 1 else "失败重试轮"
+                with self._lock:
+                    self._batch.update(
+                        queue=list(pending), active=list(active),
+                        completed=published, round=round_number,
+                        message=(f"{round_label}：运行 {len(active)} 个，"
+                                 f"等待 {len(pending)} 个"),
+                    )
+                time.sleep(0.1)
+            return round_completed
+
+        first_results = run_round(selected, 1, force)
+        all_round_results.extend(first_results)
+        retry_names = [
+            item["workflow"] for item in first_results
+            if item["status"] in retryable_statuses
+            and item["workflow"] not in self._batch_cancelled
+        ]
+        retry_results: list[dict[str, Any]] = []
+        if retry_enabled and retry_names and not self._batch_stop.is_set():
+            retry_labels = [
+                self.config["workflows"][name].get("display_name", name)
+                for name in retry_names
+            ]
+            logging.getLogger("gameflow").info(
+                "第一轮结束；以下失败任务进入第二轮自动重试：%s",
+                "、".join(retry_labels))
             with self._lock:
-                self._batch.update(queue=list(pending), active=list(active), completed=list(completed),
-                                   message=f"运行 {len(active)} 个，等待 {len(pending)} 个")
-            time.sleep(0.1)
+                self._batch.update(
+                    queue=list(retry_names), active=[], round=2,
+                    message=f"第一轮结束，准备重试 {len(retry_names)} 个失败任务",
+                    completed=list(first_results),
+                )
+            # The retry is deliberate and must not be blocked by today's prior run.
+            retry_results = run_round(retry_names, 2, True)
+            all_round_results.extend(retry_results)
+
+        first_by_name = {item["workflow"]: item for item in first_results}
+        retry_by_name = {item["workflow"]: item for item in retry_results}
+        completed: list[dict[str, Any]] = []
+        for name in selected:
+            first = first_by_name.get(name)
+            if first is None:
+                continue
+            retry = retry_by_name.get(name)
+            if retry is None:
+                completed.append(first)
+                continue
+            completed.append({
+                **retry,
+                "first_status": first["status"],
+                "first_message": first.get("message", ""),
+                "retried": True,
+                "message": (f"第二轮：{retry.get('message', '')}；"
+                            f"第一轮：{first.get('message', '')}"),
+            })
         statuses = [item["status"] for item in completed]
         if self._batch_stop.is_set():
             message = "每日流程已停止"
@@ -398,9 +514,11 @@ class WorkflowManager:
                 s in ("success", "skipped", "cancelled") for s in statuses):
             message = "每日流程已完成，部分任务已取消"
         elif statuses and all(s in ("success", "skipped") for s in statuses):
-            message = "每日流程全部完成"
+            message = (f"每日流程全部完成；第二轮成功恢复 {len(retry_names)} 个失败任务"
+                       if retry_names else "每日流程全部完成")
         else:
-            message = "每日流程完成，但存在失败任务"
+            still_failed = sum(status in retryable_statuses for status in statuses)
+            message = f"每日流程完成；第二轮后仍有 {still_failed} 个失败任务"
         if not self._batch_stop.is_set():
             mail_ok, mail_message = send_daily_screenshots(
                 self.root, self.config, selected, completed, batch_started_epoch)

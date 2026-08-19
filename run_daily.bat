@@ -1,4 +1,2 @@
 @echo off
-cd /d "%~dp0"
-python main.py run daily_game
-pause
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch_admin.ps1" daily_game

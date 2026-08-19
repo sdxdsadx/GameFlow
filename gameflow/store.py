@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime
@@ -20,6 +21,7 @@ class Store:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, workflow TEXT NOT NULL,
                 status TEXT NOT NULL, trigger_name TEXT NOT NULL,
                 started_at TEXT NOT NULL, finished_at TEXT, message TEXT DEFAULT '')""")
+            self._ensure_column(db, "runs", "owner_pid", "INTEGER")
             db.execute("""CREATE TABLE IF NOT EXISTS step_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
                 step_id TEXT NOT NULL, runner TEXT NOT NULL, status TEXT NOT NULL,
@@ -36,13 +38,22 @@ class Store:
         return db
 
     @staticmethod
+    def _ensure_column(db: sqlite3.Connection, table: str,
+                       column: str, definition: str) -> None:
+        columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @staticmethod
     def now() -> str:
         return datetime.now().astimezone().isoformat(timespec="seconds")
 
     def start_run(self, workflow: str, trigger: str) -> int:
         with self._lock, self._connect() as db:
-            cur = db.execute("INSERT INTO runs(workflow,status,trigger_name,started_at) VALUES(?,?,?,?)",
-                             (workflow, "running", trigger, self.now()))
+            cur = db.execute(
+                """INSERT INTO runs(workflow,status,trigger_name,started_at,owner_pid)
+                   VALUES(?,?,?,?,?)""",
+                (workflow, "running", trigger, self.now(), os.getpid()))
             return int(cur.lastrowid)
 
     def finish_run(self, run_id: int, status: str, message: str = "") -> None:
@@ -145,8 +156,53 @@ class Store:
 
     def recover_interrupted_runs(self) -> int:
         """Mark runs abandoned by a previous GameFlow process as interrupted."""
+        now = datetime.now().astimezone()
+        stale_ownerless_hours = 6.0
+        recovered = 0
         with self._lock, self._connect() as db:
-            cur = db.execute(
-                "UPDATE runs SET status='interrupted',finished_at=?,message=? WHERE status='running'",
-                (self.now(), "GameFlow 进程在任务完成前退出，运行状态已失去监管"))
-            return cur.rowcount
+            rows = db.execute(
+                "SELECT id,started_at,owner_pid FROM runs WHERE status='running'"
+            ).fetchall()
+            for row in rows:
+                owner_pid = row["owner_pid"]
+                should_recover = False
+                if owner_pid is not None:
+                    should_recover = not self._process_alive(int(owner_pid))
+                else:
+                    started = parse_timestamp(row["started_at"])
+                    if started is not None:
+                        age_hours = (now - started).total_seconds() / 3600
+                        should_recover = age_hours >= stale_ownerless_hours
+                if not should_recover:
+                    continue
+                db.execute(
+                    "UPDATE runs SET status='interrupted',finished_at=?,message=? WHERE id=?",
+                    (self.now(), "GameFlow 进程在任务完成前退出，运行状态已失去监管",
+                     row["id"]))
+                recovered += 1
+        return recovered
+
+    @staticmethod
+    def _process_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if os.name != "nt":
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                return False
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                return False

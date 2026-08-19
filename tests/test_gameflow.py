@@ -26,10 +26,13 @@ from gameflow.runners import (RUNNERS, EmulatorBlackScreenWatchdog, Result, RunC
                               _parse_baas_queue_count,
                               _naruto_lobby_icon_metrics,
                               _naruto_visual_metrics, _screen_is_black,
+                              _screen_looks_like_blue_archive_update,
+                              _screen_looks_like_blue_archive_title,
+                              _screen_looks_like_blue_archive_update_progress,
                               run_alas_gui,
                               run_adb, run_baas_gui, run_ba_reward_verify, run_gumballs_gui,
                               run_log_gui_daily, run_maa_gui, run_maaend_gui, run_mumu_wait,
-                              run_naruto_shadow)
+                              run_naruto_shadow, run_qq_reader_trial)
 
 
 class GameFlowTests(unittest.TestCase):
@@ -190,18 +193,13 @@ class GameFlowTests(unittest.TestCase):
             self.assertIn(required, PAGE)
         self.assertIn("明日更新", PAGE)
 
-    def test_resource_update_marker_detection_is_scoped_to_star_rail(self):
+    def test_star_rail_config_rejects_incomplete_daily_training(self):
         root = Path(__file__).resolve().parents[1]
         config = load_config(root / "config" / "workflow.json")
-        configured = [
-            (workflow_id, step["id"])
-            for workflow_id, workflow in config["workflows"].items()
-            for step in workflow["steps"]
-            if step.get("update_markers")
-        ]
-        self.assertEqual(configured, [("star_rail_daily", "run_star_rail_daily")])
-        markers = config["workflows"]["star_rail_daily"]["steps"][0]["update_markers"]
-        self.assertIn("GitHub 发现新版本", markers)
+        step = config["workflows"]["star_rail_daily"]["steps"][0]
+        self.assertIn("每日实训未完成", step["error_markers"])
+        self.assertIn("每日实训已完成", step["completion_markers"])
+        self.assertNotIn("每日实训奖励完成", step["completion_markers"])
 
     def test_black_screen_classifier_and_five_minute_watchdog(self):
         import cv2
@@ -226,6 +224,56 @@ class GameFlowTests(unittest.TestCase):
         self.assertIsNotNone(detected)
         self.assertTrue(detected.details["black_screen_restart"])
         self.assertGreaterEqual(detected.details["black_seconds"], 300)
+
+    def test_blue_archive_update_screen_classifier(self):
+        import cv2
+        import numpy as np
+
+        image = np.full((720, 1280, 3), 70, dtype=np.uint8)
+        image[137:576, 358:922] = (238, 238, 238)
+        image[468:548, 640:896] = (255, 200, 30)
+        ok, metrics = _screen_looks_like_blue_archive_update(
+            cv2.imencode(".png", image)[1].tobytes(), {})
+        self.assertTrue(ok, metrics)
+
+        initialization = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        initialization[680:710, 28:58] = (255, 170, 30)
+        initialization[680:710, 68:270] = (238, 238, 238)
+        false_update, _ = _screen_looks_like_blue_archive_update(
+            cv2.imencode(".png", initialization)[1].tobytes(), {})
+        self.assertFalse(false_update)
+
+        locked_stage_notice = np.full((720, 1280, 3), 70, dtype=np.uint8)
+        locked_stage_notice[137:576, 358:922] = (238, 238, 238)
+        locked_stage_notice[468:548, 519:759] = (255, 200, 30)
+        false_update, _ = _screen_looks_like_blue_archive_update(
+            cv2.imencode(".png", locked_stage_notice)[1].tobytes(), {})
+        self.assertFalse(false_update)
+
+    def test_blue_archive_title_and_update_progress_are_distinct(self):
+        import cv2
+        import numpy as np
+
+        title = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        title[0:158, 0:384] = (255, 190, 25)
+        title[598:655, 320:960] = (240, 240, 240)
+        title_png = cv2.imencode(".png", title)[1].tobytes()
+        self.assertTrue(_screen_looks_like_blue_archive_title(title_png, {})[0])
+        self.assertFalse(
+            _screen_looks_like_blue_archive_update_progress(title_png, {})[0])
+
+        progress = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        progress[652:662, 26:1254] = (95, 95, 95)
+        progress_png = cv2.imencode(".png", progress)[1].tobytes()
+        self.assertTrue(
+            _screen_looks_like_blue_archive_update_progress(progress_png, {})[0])
+        self.assertFalse(_screen_looks_like_blue_archive_title(progress_png, {})[0])
+
+        launcher = np.full((720, 1280, 3), 52, dtype=np.uint8)
+        launcher[652:662, 26:1254] = (45, 45, 45)
+        launcher_png = cv2.imencode(".png", launcher)[1].tobytes()
+        self.assertFalse(
+            _screen_looks_like_blue_archive_update_progress(launcher_png, {})[0])
 
     def test_black_screen_restarts_emulator_then_retries_script(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,6 +355,58 @@ class GameFlowTests(unittest.TestCase):
             marker = store.get_workflow_flag(
                 "azur_lane_daily", "update_before_next_day")
             self.assertEqual(marker["wait_seconds"], 600)
+
+    def test_next_day_update_wait_is_injected_into_baas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            seen = {}
+            store.set_workflow_flag("blue_archive_daily", "update_before_next_day",
+                                    {"marked_day": "2000-01-01",
+                                     "wait_seconds": 600,
+                                     "reason": "update"})
+
+            def baas(step, ctx):
+                seen.update(step)
+                step["_startup_update_wait_consumed"] = True
+                return Result(True, "ok")
+
+            config = {"workflows": {"blue_archive_daily": {"steps": [{
+                "id": "baas", "runner": "baas_gui",
+            }]}}}
+            with patch.dict(RUNNERS, {"baas_gui": baas}):
+                engine = Engine(root, config, store)
+                engine.start("blue_archive_daily")
+                engine._thread.join(5)
+            self.assertEqual(seen["startup_update_wait"], 600)
+            self.assertIsNone(store.get_workflow_flag(
+                "blue_archive_daily", "update_before_next_day"))
+
+    def test_next_day_update_flag_remains_until_runner_consumes_wait(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            seen = {}
+            marker = {"marked_day": "2000-01-01", "wait_seconds": 600,
+                      "reason": "update"}
+            store.set_workflow_flag(
+                "blue_archive_daily", "update_before_next_day", marker)
+
+            def baas(step, ctx):
+                seen.update(step)
+                return Result(True, "runner exited before consuming wait")
+
+            config = {"workflows": {"blue_archive_daily": {"steps": [{
+                "id": "baas", "runner": "baas_gui",
+            }]}}}
+            with patch.dict(RUNNERS, {"baas_gui": baas}):
+                engine = Engine(root, config, store)
+                engine.start("blue_archive_daily")
+                engine._thread.join(5)
+
+            self.assertEqual(seen["startup_update_wait"], 600)
+            self.assertEqual(store.get_workflow_flag(
+                "blue_archive_daily", "update_before_next_day"), marker)
 
     def test_script_gui_is_confirmed_foreground_before_click(self):
         hwnd = 2468
@@ -447,6 +547,10 @@ class GameFlowTests(unittest.TestCase):
         self.assertIn("按住拖拽调整顺序", PAGE)
         self.assertNotIn("枫原万叶", PAGE)
         self.assertLess(PAGE.index('id="startDaily"'), PAGE.index('<section class="hero">'))
+        self.assertIn('id="qqTrial"', PAGE)
+        self.assertIn("runQQTrial()", PAGE)
+        self.assertIn("!x.test_only", PAGE)
+        self.assertIn("每日自动化总控", PAGE)
 
     def test_windows_command_output_decoding(self):
         message = "成功: 已终止进程。"
@@ -514,17 +618,39 @@ class GameFlowTests(unittest.TestCase):
                          [817, 600])
         self.assertIn("float_start_x", naruto["orientation_points"]["portrait"])
         self.assertIn("float_start_x", naruto["orientation_points"]["landscape"])
-        self.assertEqual(naruto["stage1_wrong_foreground_checks"], 2)
+        self.assertGreaterEqual(naruto["stage1_wrong_foreground_checks"], 5)
+        self.assertEqual(
+            naruto["orientation_points"]["portrait"]["popup_confirm_point"],
+            [360, 935])
+        self.assertEqual(
+            naruto["orientation_points"]["landscape"]["popup_confirm_point"],
+            [640, 515])
+        self.assertEqual(naruto["shadow_update_grace_versions"], 3)
+        self.assertEqual(naruto["shadow_update_confirm_point"], [760, 500])
+        self.assertGreaterEqual(naruto["shadow_update_popup_close_wait"], 10)
         self.assertGreaterEqual(naruto["lobby_icon_min_matches"], 3)
         self.assertGreaterEqual(len(naruto["lobby_reference_paths"]), 2)
         zenless = config["workflows"]["zenless_daily"]["steps"][0]
         self.assertEqual(zenless["retry"], 1)
         self.assertGreaterEqual(zenless["state_stall_overrides"]["^空洞操作器 \\|"], 900)
+        self.assertTrue(any(
+            "游戏窗口未就绪" in marker
+            for marker in zenless["update_failure_markers"]))
         self.assertEqual(config["failure_retry"]["max_attempts"], 2)
         maa = config["workflows"]["daily_game"]["steps"][2]
-        self.assertEqual(maa["log_stall_seconds"], 1800)
+        self.assertEqual(maa["log_stall_seconds"], 600)
+        self.assertTrue(maa["gui_start_click"])
+        self.assertEqual(maa["max_start_clicks"], 6)
+        self.assertEqual(
+            config["workflows"]["daily_game"]["steps"][1]["settle_seconds"], 60)
+        self.assertTrue(
+            config["workflows"]["blue_archive_daily"]["steps"][2]
+            .get("queue_only_completion", True))
         star_rail = config["workflows"]["star_rail_daily"]["steps"][0]
         self.assertEqual(star_rail["max_start_clicks"], 20)
+        self.assertEqual(star_rail["launch_args"], ["main", "-e"])
+        self.assertEqual(star_rail["startup_ack_button_names"], ["我已知晓", "好的"])
+        self.assertEqual(star_rail["max_startup_ack_clicks"], 3)
         self.assertIn("GitHub 发现新版本", star_rail["update_markers"])
         self.assertTrue(star_rail["dismiss_update_notice"])
         self.assertEqual(star_rail["update_ack_button_names"], ["好的"])
@@ -567,7 +693,12 @@ class GameFlowTests(unittest.TestCase):
         self.assertIn("按游戏启动成功处理", float_loop)
         self.assertNotIn("if game_focused:", float_loop)
         self.assertIn("locate_float_icon_details()", float_loop)
-        self.assertIn("半缩在右侧边缘", float_loop)
+        self.assertIn("handle_game_blocking_page()", float_loop)
+        self.assertIn("classify_collapsed_float_control(icon_point)", float_loop)
+        self.assertIn("全程未点击该方形符", float_loop)
+        self.assertIn('side_label = "左侧"', float_loop)
+        self.assertIn('else "右侧"', float_loop)
+        self.assertIn("半缩在{side_label}边缘", float_loop)
         self.assertIn("浮窗点击前检测到其他应用位于前台", float_loop)
         self.assertIn("取消本次坐标点击", float_loop)
         self.assertNotIn("未知，按校准坐标尝试", float_loop)
@@ -575,6 +706,8 @@ class GameFlowTests(unittest.TestCase):
         stage_one = source[source.index("# Stage 1:"):
                            source.index("# Stage 2:")]
         self.assertIn("stage1_wrong_foreground_checks", stage_one)
+        self.assertIn("is_login_method_page(image)", stage_one)
+        self.assertIn("handle_game_blocking_page()", stage_one)
         self.assertIn('"emulator_restart_requested": True', stage_one)
 
     def test_successful_workflow_and_history(self):
@@ -601,6 +734,33 @@ class GameFlowTests(unittest.TestCase):
             engine = Engine(root, config, store); engine.start("test"); engine._thread.join(5)
             self.assertEqual(engine.state()["last_status"], "failed")
             self.assertEqual(marker.read_text(), "ok")
+
+    def test_cancelled_workflow_gives_run_always_cleanup_a_live_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "db.sqlite")
+            cleanup_stop_states = []
+
+            def cancel_run(step, ctx):
+                ctx.stop_event.set()
+                return Result(False, "cancelled by user", status="cancelled")
+
+            def cleanup(step, ctx):
+                cleanup_stop_states.append(ctx.stop_event.is_set())
+                return Result(True, "cleanup completed")
+
+            config = {"workflows": {"test": {"steps": [
+                {"id": "main", "runner": "cancel_run"},
+                {"id": "cleanup", "runner": "cleanup", "run_always": True},
+            ]}}}
+            with patch.dict(RUNNERS, {
+                    "cancel_run": cancel_run, "cleanup": cleanup}):
+                engine = Engine(root, config, store)
+                engine.start("test")
+                engine.join(2)
+
+            self.assertEqual(cleanup_stop_states, [False])
+            self.assertEqual(engine.state()["last_status"], "cancelled")
 
     def test_ignored_cleanup_failure_does_not_overwrite_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -710,6 +870,40 @@ class GameFlowTests(unittest.TestCase):
             self.assertTrue(result.success)
             self.assertEqual(result.details["queue_count"], 0)
 
+    def test_baas_initial_empty_queue_without_current_run_evidence_is_not_success(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir()
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            step = {
+                "executable": str(exe),
+                "log_glob": str(logs / "*_baas1.log"),
+                "require_empty_queue": True,
+                "queue_check_interval": 0.01,
+                "queue_empty_confirm_seconds": 0,
+                "startup_timeout": 0.12,
+                "poll_seconds": 0.01,
+                "timeout": 1,
+                "clean_existing": False,
+                "close_on_complete": False,
+                "gui_click_fallback": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()), patch(
+                    "gameflow.runners._read_baas_queue_count",
+                    return_value=(0, True, "idle")):
+                result = run_baas_gui(step, ctx)
+
+            self.assertFalse(result.success)
+            self.assertIn("仍无任务启动日志", result.message)
+            self.assertNotIn("work_evidence", result.details)
+
     def test_baas_queue_zero_and_success_log_finish_when_idle_state_is_unreadable(self):
         class FakeProcess:
             pid = 123456789
@@ -729,7 +923,7 @@ class GameFlowTests(unittest.TestCase):
             threading.Thread(target=write_success, daemon=True).start()
             step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
                     "require_empty_queue": True, "queue_check_interval": 0.03,
-                    "queue_empty_confirm_seconds": 0.03, "completion_quiet_seconds": 0.05,
+                    "queue_empty_confirm_seconds": 0, "completion_quiet_seconds": 1,
                     "poll_seconds": 0.01, "log_stall_seconds": 2, "timeout": 3,
                     "clean_existing": False, "close_on_complete": False,
                     "gui_click_fallback": False}
@@ -743,7 +937,39 @@ class GameFlowTests(unittest.TestCase):
                     "gameflow.runners._read_baas_queue_count", side_effect=queue_state):
                 result = run_baas_gui(step, ctx)
             self.assertTrue(result.success)
-            self.assertEqual(result.details["completion_mode"], "queue_zero_log_quiet")
+            self.assertEqual(result.details["completion_mode"], "queue_zero_success_marker")
+
+    def test_baas_successful_queue_click_arms_stall_watchdog(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir()
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "require_empty_queue": True, "queue_check_interval": 0.02,
+                    "poll_seconds": 0.01, "log_stall_seconds": 0.08,
+                    "startup_timeout": 2, "timeout": 2,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False, "gui_fallback_retry_seconds": 1}
+
+            queue_states = [(10, True, "idle"), (10, False, "running")]
+
+            def queue_state(_pid):
+                return queue_states.pop(0) if len(queue_states) > 1 else queue_states[0]
+
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), patch(
+                    "gameflow.runners._read_baas_queue_count",
+                    side_effect=queue_state), patch(
+                    "gameflow.runners._click_baas_start_button",
+                    return_value=(True, "clicked")):
+                result = run_baas_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertTrue(result.details["log_stalled"])
 
     def test_baas_ticket_shortage_is_nonfatal(self):
         class FakeProcess:
@@ -793,6 +1019,7 @@ class GameFlowTests(unittest.TestCase):
             h, w = work.shape[:2]
             home[100:100+h, 200:200+w] = work
             task_page = np.full((720, 1280, 3), 80, dtype=np.uint8)
+            task_page[670:700, 510:856] = (255, 200, 0)
             home_png = cv2.imencode(".png", home)[1].tobytes()
             page_png = cv2.imencode(".png", task_page)[1].tobytes()
             calls = [Done(home_png), Done(), Done(page_png)]
@@ -806,6 +1033,36 @@ class GameFlowTests(unittest.TestCase):
                 result = run_ba_reward_verify(step, ctx)
             self.assertTrue(result.success)
             self.assertTrue((root / "evidence.png").exists())
+
+    def test_blue_archive_reward_verification_rejects_gray_buttons_when_progress_incomplete(self):
+        import cv2
+        import numpy as np
+
+        class Done:
+            def __init__(self, stdout=b"", stderr=b"", returncode=0):
+                self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = np.zeros((720, 1280, 3), dtype=np.uint8)
+            task_page = np.full((720, 1280, 3), 80, dtype=np.uint8)
+            task_page[670:700, 510:807] = (255, 200, 0)
+            calls = [
+                Done(cv2.imencode(".png", home)[1].tobytes()),
+                Done(),
+                Done(cv2.imencode(".png", task_page)[1].tobytes()),
+            ]
+            step = {
+                "device": "test", "entry_x_ratio": 0.052, "entry_y_ratio": 0.326,
+                "evidence_path": str(root / "evidence.png"), "page_wait": 0,
+            }
+            ctx = RunContext(root, {"tools": {"adb": "adb"}}, lambda _: None,
+                             threading.Event())
+            with patch("gameflow.runners.subprocess.run", side_effect=calls):
+                result = run_ba_reward_verify(step, ctx)
+            self.assertFalse(result.success)
+            self.assertIn("进度未满", result.message)
+            self.assertLess(result.details["progress"]["fill_ratio"], 0.94)
 
     def test_baas_runner_waits_until_last_completed_task_is_work_task(self):
         class FakeProcess:
@@ -914,6 +1171,50 @@ class GameFlowTests(unittest.TestCase):
             self.assertEqual(result.details["recoverable_events"], 1)
             self.assertTrue(any("可恢复异常" in message for message in messages))
 
+    def test_baas_repeated_update_prompt_click_is_capped(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
+            shot = root / "latest.png"; shot.write_bytes(b"png")
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "black_screen_screenshot_path": str(shot),
+                    "update_screen_detection": True, "next_day_update_wait": 600,
+                    "update_screen_check_interval": 0.05,
+                    "update_screen_grace_seconds": 0,
+                    "update_screen_confirm_count": 1,
+                    "max_update_confirm_clicks": 1,
+                    "poll_seconds": 0.01, "startup_timeout": 1, "timeout": 1,
+                    "clean_existing": False, "close_on_complete": False,
+                    "gui_click_fallback": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners.EmulatorBlackScreenWatchdog.poll",
+                          return_value=None), \
+                    patch("gameflow.runners._screen_looks_like_blue_archive_update",
+                          return_value=(True, {
+                              "ba_update_dialog_light_ratio": 0.9,
+                              "ba_update_confirm_cyan_ratio": 0.8})), \
+                    patch("gameflow.runners._screen_looks_like_blue_archive_title",
+                          return_value=(False, {})), \
+                    patch("gameflow.runners._screen_looks_like_blue_archive_update_progress",
+                          return_value=(False, {})), \
+                    patch("gameflow.runners.subprocess.run",
+                          return_value=SimpleNamespace(
+                              returncode=0, stdout=b"", stderr=b"")):
+                result = run_baas_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "needs_update")
+            self.assertTrue(result.details["defer_update_next_day"])
+            self.assertEqual(result.details["next_day_update_wait"], 600)
+
     def test_baas_restarts_offline_emulator_and_resumes(self):
         class FakeProcess:
             pid = 123456789
@@ -970,7 +1271,7 @@ class GameFlowTests(unittest.TestCase):
             ctx = RunContext(root, {}, lambda _: None, threading.Event())
             clicks = 0
 
-            def click(*args):
+            def click(*args, **kwargs):
                 nonlocal clicks
                 clicks += 1
                 if clicks == 2:
@@ -989,6 +1290,39 @@ class GameFlowTests(unittest.TestCase):
                 result = run_baas_gui(step, ctx)
             self.assertTrue(result.success)
             self.assertEqual(clicks, 2)
+
+    def test_baas_does_not_fallback_click_while_queue_is_running(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
+            logs = root / "logs"; logs.mkdir(); (logs / "today_baas1.log").write_text(
+                "RestartTaskException: ATX卡死，重启任务\n", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            clicks = 0
+
+            def click(*args):
+                nonlocal clicks
+                clicks += 1
+                return True, "clicked"
+
+            step = {"executable": str(exe), "log_glob": str(logs / "*_baas1.log"),
+                    "require_empty_queue": True, "gui_fallback_after": 0,
+                    "gui_fallback_retry_seconds": 0.02, "startup_timeout": 0.12,
+                    "max_start_clicks": 4, "poll_seconds": 0.01,
+                    "queue_check_interval": 0.01, "timeout": 0.4,
+                    "clean_existing": False, "close_on_complete": False}
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._read_baas_queue_count",
+                          return_value=(7, False, "running")), \
+                    patch("gameflow.runners._click_baas_start_button", side_effect=click):
+                result = run_baas_gui(step, ctx)
+            self.assertFalse(result.success)
+            self.assertEqual(clicks, 0)
 
     def test_maa_gui_follows_successor_after_launcher_exit(self):
         class FakeProcess:
@@ -1059,6 +1393,87 @@ class GameFlowTests(unittest.TestCase):
             self.assertIn("日志已停滞", result.message)
             self.assertTrue(result.details["retry_step"])
 
+    def test_maa_gui_clicks_start_after_emulator_settles(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "MAA.exe"
+            exe.write_bytes(b"")
+            asst = root / "asst.log"
+            asst.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def click(*args):
+                asst.write_text("task started\nAllTasksCompleted\n", encoding="utf-8")
+                return True, "clicked"
+
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_named_gui_button",
+                          side_effect=click) as start_click:
+                result = run_maa_gui({
+                    "executable": str(exe),
+                    "log_path": str(asst),
+                    "gui_start_click": True,
+                    "initial_start_click_delay": 0,
+                    "start_click_interval": 0.01,
+                    "max_start_clicks": 2,
+                    "timeout": 3,
+                    "close_on_complete": False,
+                }, ctx)
+            self.assertTrue(result.success, result.message)
+            start_click.assert_called_once()
+            self.assertEqual(start_click.call_args.args[3], ["开始任务", "开始"])
+
+    def test_maa_exact_updater_marker_returns_needs_update_without_waiting(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "MAA.exe"
+            exe.write_bytes(b"")
+            asst = root / "asst.log"
+            asst.write_text("", encoding="utf-8")
+            gui = root / "gui.log"
+            gui.write_text("", encoding="utf-8")
+            stop = Mock()
+            stop.wait.return_value = False
+            stop.is_set.return_value = False
+            ctx = RunContext(root, {}, lambda _: None, stop)
+            exact_marker = "MAA.Updater started (C++ external updater)."
+
+            def launch(*args, **kwargs):
+                gui.write_text(exact_marker + "\n", encoding="utf-8")
+                return FakeProcess()
+
+            started = time.monotonic()
+            with patch("gameflow.runners.subprocess.Popen",
+                       side_effect=launch), patch(
+                    "gameflow.runners._process_image_exists",
+                    return_value=False):
+                result = run_maa_gui({
+                    "executable": str(exe),
+                    "log_path": str(asst),
+                    "gui_log_path": str(gui),
+                    "update_markers": [exact_marker],
+                    "timeout": 30,
+                    "close_on_complete": False,
+                }, ctx)
+            elapsed = time.monotonic() - started
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "needs_update")
+            self.assertEqual(result.details["marker"], exact_marker)
+            self.assertLess(elapsed, 0.5)
+
     def test_naruto_completion_and_reward_visuals(self):
         import cv2
         import numpy as np
@@ -1079,13 +1494,36 @@ class GameFlowTests(unittest.TestCase):
 
         popup = np.full((720, 1280, 3), 30, dtype=np.uint8)
         popup[120:600, 40:1240] = 255
-        self.assertTrue(_naruto_visual_metrics(popup)["completion_popup"])
+        popup_metrics = _naruto_visual_metrics(popup)
+        self.assertTrue(popup_metrics["completion_popup"])
+        self.assertFalse(popup_metrics["shadow_mandatory_update_popup"])
+
+        mandatory_update = np.full((720, 1280, 3), 30, dtype=np.uint8)
+        mandatory_update[78:646, 48:1232] = 255
+        for x1, x2 in ((410, 625), (655, 870)):
+            cv2.rectangle(mandatory_update, (x1, 450), (x2, 560),
+                          (190, 190, 190), thickness=-1)
+            cv2.rectangle(mandatory_update, (x1 + 5, 455), (x2 - 5, 555),
+                          (255, 255, 255), thickness=-1)
+        update_metrics = _naruto_visual_metrics(mandatory_update)
+        self.assertTrue(update_metrics["shadow_mandatory_update_popup"])
+        self.assertGreaterEqual(update_metrics["popup_white_bottom_fraction"], 0.87)
 
         portrait_dialog = np.full((1280, 720, 3), 30, dtype=np.uint8)
         portrait_dialog[210:990, 45:675] = 255
         portrait_metrics = _naruto_visual_metrics(portrait_dialog)
         self.assertTrue(portrait_metrics["portrait_white_dialog"])
         self.assertFalse(portrait_metrics["completion_popup"])
+        self.assertFalse(portrait_metrics["shadow_update_choice_popup"])
+
+        portrait_update = portrait_dialog.copy()
+        for x1, x2 in ((150, 330), (390, 570)):
+            cv2.rectangle(portrait_update, (x1, 780), (x2, 875),
+                          (190, 190, 190), thickness=-1)
+            cv2.rectangle(portrait_update, (x1 + 5, 785), (x2 - 5, 870),
+                          (255, 255, 255), thickness=-1)
+        self.assertTrue(
+            _naruto_visual_metrics(portrait_update)["shadow_update_choice_popup"])
 
         privacy_hsv = np.zeros((1280, 720, 3), dtype=np.uint8)
         privacy_hsv[:, :, 2] = 30
@@ -1556,7 +1994,7 @@ class GameFlowTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); exe = root / "Launcher.exe"; exe.write_bytes(b"")
-            log = root / "daily.log"; log.write_text("", encoding="utf-8")
+            log = root / "daily.log"; log.write_text("OLD\n", encoding="utf-8")
             ctx = RunContext(root, {}, lambda _: None, threading.Event())
 
             def write_log():
@@ -1566,6 +2004,7 @@ class GameFlowTests(unittest.TestCase):
             threading.Thread(target=write_log, daemon=True).start()
             step = {"display_name": "测试每日", "executable": str(exe),
                     "log_glob": str(log), "process_images": ["Launcher.exe"],
+                    "launch_args": ["main"],
                     "button_names": ["完整运行"], "title_hints": ["Test"],
                     "log_retry_interval": 0.05, "start_markers": ["RUN START"],
                     "completion_markers": ["ALL DONE"],
@@ -1575,7 +2014,8 @@ class GameFlowTests(unittest.TestCase):
                     "completion_quiet_seconds": 0.05,
                     "cleanup_process_images": [],
                     "timeout": 2, "clean_existing": False, "close_on_complete": True}
-            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()) as launch, \
                     patch("gameflow.runners._click_named_gui_button",
                           return_value=(True, "clicked")) as click, \
                     patch("gameflow.runners._bring_game_window_to_front",
@@ -1586,6 +2026,7 @@ class GameFlowTests(unittest.TestCase):
                           return_value=(1, "closed")) as close_gui:
                 result = run_log_gui_daily(step, ctx)
             self.assertTrue(result.success)
+            self.assertEqual(launch.call_args.args[0], [str(exe), "main"])
             self.assertGreaterEqual(click.call_count, 2)
             foreground.assert_called_once()
             screenshot.assert_called_once()
@@ -1664,7 +2105,7 @@ class GameFlowTests(unittest.TestCase):
             self.assertEqual(result.status, "needs_update")
             self.assertIn("需要更新", result.message)
 
-    def test_log_gui_daily_acknowledges_update_then_starts(self):
+    def test_log_gui_daily_reports_game_update_when_confirm_is_followed_by_exit(self):
         class FakeProcess:
             pid = 123456789
             returncode = None
@@ -1678,18 +2119,58 @@ class GameFlowTests(unittest.TestCase):
             log = root / "daily.log"
             log.write_text("", encoding="utf-8")
             ctx = RunContext(root, {}, lambda _: None, threading.Event())
-            calls = []
 
+            def write_update_exit():
+                time.sleep(0.05)
+                log.write_text(
+                    "指令[ 一条龙 ] 节点 检测游戏窗口 返回状态 未打开游戏窗口\n"
+                    "指令[ 进入游戏 ] 节点 检测游戏窗口 -> 画面识别 返回状态 确定\n"
+                    "RuntimeError: 游戏窗口未就绪\n"
+                    "指令[ 一条龙 ] 执行失败 返回状态 异常\n",
+                    encoding="utf-8")
+
+            threading.Thread(target=write_update_exit, daemon=True).start()
+            step = {
+                "display_name": "绝区零一条龙",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "start_markers": ["指令[ 一条龙 ] 节点 检测游戏窗口"],
+                "error_markers": ["指令[ 一条龙 ] 执行失败"],
+                "state_watchdog_regex":
+                    r"指令\[\s*([^\]]+)\s*\]\s*节点\s*(.*?)\s*->.*?返回状态\s*(.*)$",
+                "update_failure_state_regex": r"^进入游戏 \| 检测游戏窗口 \| 确定$",
+                "update_failure_markers": ["RuntimeError: 游戏窗口未就绪"],
+                "initial_click_delay": 10,
+                "log_retry_interval": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()):
+                result = run_log_gui_daily(step, ctx)
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "needs_update")
+            self.assertEqual(result.details["reason_code"], "game_update_required")
+            self.assertEqual(result.details["marker"], "RuntimeError: 游戏窗口未就绪")
+
+    def test_log_gui_daily_update_marker_wins_even_when_dismiss_is_enabled(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
             def write_update():
                 time.sleep(0.03)
                 log.write_text("GitHub 发现新版本: v2026.7.26\n", encoding="utf-8")
-
-            def click(root_pid, process_images, title_hints, names, x_ratio, y_ratio):
-                calls.append((list(names), x_ratio, y_ratio))
-                if names == ["完整运行"]:
-                    with log.open("a", encoding="utf-8") as handle:
-                        handle.write("开始运行\n每日实训已完成\n")
-                return True, "clicked"
 
             threading.Thread(target=write_update, daemon=True).start()
             step = {
@@ -1700,6 +2181,7 @@ class GameFlowTests(unittest.TestCase):
                 "button_names": ["完整运行"],
                 "update_markers": ["GitHub 发现新版本"],
                 "dismiss_update_notice": True,
+                "skip_on_update": False,
                 "update_ack_button_names": ["好的"],
                 "update_ack_x_ratio": 0.366,
                 "update_ack_y_ratio": 0.912,
@@ -1716,12 +2198,119 @@ class GameFlowTests(unittest.TestCase):
             }
             with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
                     patch("gameflow.runners._click_named_gui_button",
+                          return_value=(True, "clicked")) as click:
+                result = run_log_gui_daily(step, ctx)
+            self.assertFalse(result.success)
+            self.assertEqual(result.status, "needs_update")
+            self.assertIn("GitHub 发现新版本", result.details["marker"])
+            click.assert_not_called()
+
+    def test_log_gui_daily_irrelevant_prestart_logs_do_not_postpone_click(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def emit_irrelevant_logs():
+                for index in range(20):
+                    time.sleep(0.01)
+                    with log.open("a", encoding="utf-8") as handle:
+                        handle.write(f"background heartbeat {index}\n")
+
+            def click(*args):
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("RUN START\nALL DONE\n")
+                return True, "clicked"
+
+            emitter = threading.Thread(target=emit_irrelevant_logs, daemon=True)
+            emitter.start()
+            step = {
+                "display_name": "测试每日",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "button_names": ["完整运行"],
+                "initial_click_delay": 0,
+                "log_retry_interval": 0.05,
+                "startup_timeout": 0.12,
+                "max_start_clicks": 1,
+                "start_markers": ["RUN START"],
+                "completion_markers": ["ALL DONE"],
+                "completion_quiet_seconds": 0,
+                "timeout": 1,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()), patch(
+                    "gameflow.runners._click_named_gui_button",
+                    side_effect=click) as start_click:
+                result = run_log_gui_daily(step, ctx)
+
+            emitter.join(1)
+            self.assertTrue(result.success, result.message)
+            start_click.assert_called_once()
+
+    def test_log_gui_daily_acknowledges_startup_modal_before_start(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            calls = []
+
+            def click(root_pid, process_images, title_hints, names, x_ratio, y_ratio):
+                calls.append((list(names), x_ratio, y_ratio))
+                if names == ["我已知晓", "好的"]:
+                    with log.open("a", encoding="utf-8") as handle:
+                        handle.write("开始运行\n每日实训已完成\n")
+                return True, "clicked"
+
+            step = {
+                "display_name": "星穹铁道完整运行",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "button_names": ["完整运行"],
+                "startup_ack_button_names": ["我已知晓", "好的"],
+                "startup_ack_x_ratio": 0.28,
+                "startup_ack_y_ratio": 0.865,
+                "startup_ack_after": 0,
+                "startup_ack_settle_seconds": 0.01,
+                "max_startup_ack_clicks": 1,
+                "initial_click_delay": 1,
+                "log_retry_interval": 0.01,
+                "start_markers": ["开始运行"],
+                "completion_markers": ["每日实训已完成"],
+                "completion_quiet_seconds": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen", return_value=FakeProcess()), \
+                    patch("gameflow.runners._click_named_gui_button",
                           side_effect=click):
                 result = run_log_gui_daily(step, ctx)
             self.assertTrue(result.success, result.message)
-            self.assertEqual(calls[0], (["好的"], 0.366, 0.912))
-            self.assertEqual(calls[1][0], ["完整运行"])
-            self.assertEqual(result.details["update_ack_clicks"], 1)
+            self.assertEqual(calls, [(["我已知晓", "好的"], 0.28, 0.865)])
+            self.assertEqual(result.details["startup_ack_clicks"], 1)
 
     def test_log_gui_daily_waits_for_detached_gui_after_launcher_exits(self):
         class ExitedLauncher:
@@ -1934,15 +2523,100 @@ class GameFlowTests(unittest.TestCase):
             config = {"workflows": {
                 "a": {"steps": [{"id": "a", "runner": "delay", "seconds": 0.05}]},
                 "b": {"steps": [{"id": "b", "runner": "delay", "seconds": 0.05}]},
+                "trial": {"test_only": True,
+                          "steps": [{"id": "trial", "runner": "delay", "seconds": 0.05}]},
                 "self_test": {"steps": [{"id": "x", "runner": "delay", "seconds": 0.05}]}
             }}
             manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
-            ok, _ = manager.start_daily(["b", "self_test"], 9)
+            ok, _ = manager.start_daily(["b", "trial", "self_test"], 9)
             self.assertTrue(ok)
             manager.join(5)
             batch = manager.state()["batch"]
             self.assertEqual(batch["max_parallel"], 1)
             self.assertEqual([x["workflow"] for x in batch["completed"]], ["b"])
+
+    def test_daily_batch_retries_only_failed_workflows_once(self):
+        attempts = {"flaky": 0, "good": 0}
+
+        def flaky_runner(step, ctx):
+            attempts["flaky"] += 1
+            if attempts["flaky"] == 1:
+                return Result(False, "first failure")
+            return Result(True, "retry success")
+
+        def good_runner(step, ctx):
+            attempts["good"] += 1
+            return Result(True, "first success")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+                "gameflow.engine.RUNNERS",
+                {"flaky_test": flaky_runner, "good_test": good_runner}):
+            root = Path(tmp)
+            config = {
+                "daily_retry": {"enabled": True,
+                                "statuses": ["failed", "interrupted"]},
+                "workflows": {
+                    "flaky": {"steps": [{"id": "run", "runner": "flaky_test"}]},
+                    "good": {"steps": [{"id": "run", "runner": "good_test"}]},
+                },
+            }
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start_daily(["flaky", "good"], 2)[0])
+            manager.join(5)
+            completed = {item["workflow"]: item
+                         for item in manager.state()["batch"]["completed"]}
+        self.assertEqual(attempts, {"flaky": 2, "good": 1})
+        self.assertEqual(completed["flaky"]["first_status"], "failed")
+        self.assertEqual(completed["flaky"]["status"], "success")
+        self.assertTrue(completed["flaky"]["retried"])
+        self.assertEqual(completed["good"]["status"], "success")
+        self.assertNotIn("retried", completed["good"])
+
+    def test_daily_batch_does_not_retry_skip_update_or_cancel(self):
+        attempts = {"update": 0, "skip": 0}
+
+        def update_runner(step, ctx):
+            attempts["update"] += 1
+            return Result(False, "game update", status="needs_update")
+
+        def skip_runner(step, ctx):
+            attempts["skip"] += 1
+            return Result(False, "maintenance", status="skipped")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+                "gameflow.engine.RUNNERS",
+                {"update_test": update_runner, "skip_test": skip_runner}):
+            root = Path(tmp)
+            config = {"workflows": {
+                "update": {"steps": [{"id": "run", "runner": "update_test"}]},
+                "skip": {"steps": [{"id": "run", "runner": "skip_test"}]},
+            }}
+            manager = WorkflowManager(root, config, Store(root / "db.sqlite"))
+            self.assertTrue(manager.start_daily(["update", "skip"], 2)[0])
+            manager.join(5)
+            completed = manager.state()["batch"]["completed"]
+        self.assertEqual(attempts, {"update": 1, "skip": 1})
+        self.assertTrue(all(item.get("round") == 1 for item in completed))
+
+    def test_qq_reader_trial_restores_saved_gui_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "maa_gui_config.json"
+            original = {"tasks": [{"name": "normal", "enabled": True,
+                                     "minutes": 99, "count": 33}]}
+            settings.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+            step = {
+                "gui_settings_path": str(settings),
+                "trial_tasks": [{"name": "trial", "enabled": True,
+                                  "minutes": 1, "count": 1}],
+            }
+            ctx = RunContext(Path(tmp), {}, lambda _: None, threading.Event())
+            with patch("gameflow.runners.run_log_gui_daily",
+                       return_value=Result(True, "ok")) as delegated:
+                result = run_qq_reader_trial(step, ctx)
+                active = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertTrue(result.success)
+            delegated.assert_called_once_with(step, ctx)
+            self.assertEqual(active, original)
 
     def test_cancel_standalone_stops_only_requested_engine(self):
         with tempfile.TemporaryDirectory() as tmp:

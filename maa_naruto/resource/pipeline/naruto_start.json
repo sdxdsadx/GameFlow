@@ -1,0 +1,191 @@
+{
+    "NarutoClickShadowEnable": {
+        "recognition": "TemplateMatch",
+        "template": "shadow_enable.png",
+        "threshold": 0.78,
+        "roi": [100, 1080, 520, 200],
+        "action": "Click",
+        "post_delay": 1200,
+        "focus": "MAA 已识别并点击影分身启动功能"
+    },
+    "NarutoClickFloatHalf": {
+        "recognition": "TemplateMatch",
+        "template": "float_half.png",
+        "threshold": 0.54,
+        "roi": [1235, 140, 45, 180],
+        "action": "Click",
+        "post_delay": 700,
+        "focus": "MAA 已识别并点击半缩悬浮窗"
+    },
+    "NarutoClickFloatFull": {
+        "recognition": "TemplateMatch",
+        "template": "float_full.png",
+        "threshold": 0.72,
+        "roi": [1170, 100, 110, 500],
+        "action": "Click",
+        "post_delay": 700,
+        "focus": "MAA 已识别并点击完整悬浮窗"
+    },
+    "NarutoClickFloatStart": {
+        "next": ["NarutoClickFloatStartTop", "NarutoClickFloatStartBottom"],
+        "timeout": 5000
+    },
+    "NarutoClickFloatStartTop": {
+        "recognition": "TemplateMatch",
+        "template": "float_menu_start.png",
+        "threshold": 0.68,
+        "roi": [760, 120, 220, 180],
+        "action": "Click",
+        "post_delay": 1200,
+        "focus": "MAA 已识别并点击右上悬浮菜单启动按钮"
+    },
+    "NarutoClickFloatStartBottom": {
+        "recognition": "TemplateMatch",
+        "template": "float_menu_start.png",
+        "threshold": 0.68,
+        "roi": [760, 340, 220, 330],
+        "action": "Click",
+        "post_delay": 1200,
+        "focus": "MAA 已识别并点击右下悬浮菜单启动按钮"
+    },
+    "NarutoRecognizeStart": {
+        "next": ["NarutoRecognizeBottomStart", "NarutoRecognizeTopStart"]
+    },
+    "NarutoRecognizeBottomStart": {
+        "recognition": "TemplateMatch",
+        "template": "float_menu_start.png",
+        "threshold": 0.68,
+        "roi": [760, 340, 220, 330],
+        "action": "DoNothing",
+        "focus": "MAA 已确认右下悬浮菜单为三角启动按钮"
+    },
+    "NarutoRecognizeTopStart": {
+        "recognition": "TemplateMatch",
+        "template": "float_menu_start.png",
+        "threshold": 0.68,
+        "roi": [760, 120, 220, 180],
+        "action": "DoNothing",
+        "focus": "MAA 已确认右上悬浮菜单为三角启动按钮"
+    },
+    "NarutoStartFromFloat": {
+        "next": ["NarutoFlowBottomHalf", "NarutoFlowBottomFull", "NarutoFlowHalf", "NarutoFlowFull"],
+        "timeout": 15000
+    },
+    "NarutoStartFromFloatTop": {
+        "next": ["NarutoFlowHalf", "NarutoFlowFull"],
+        "timeout": 15000
+    },
+    "NarutoStartFromFloatBottom": {
+        "next": ["NarutoFlowBottomHalf", "NarutoFlowBottomFull"],
+        "timeout": 15000
+    },
+    "NarutoFlowBottomHalf": {
+        "recognition": "TemplateMatch",
+        "template": "float_half.png",
+        "threshold": 0.54,
+        "roi": [1235, 340, 45, 330],
+        "action": "Click",
+        "target": [1265, 505],
+        "post_delay": 1200,
+        "next": "NarutoFlowBottomFull",
+        "timeout": 8000
+    },
+    "NarutoFlowBottomFull": {
+        "recognition": "TemplateMatch",
+        "template": "float_full_mask.png",
+        "threshold": 0.68,
+        "green_mask": true,
+        "roi": [1170, 340, 110, 330],
+        "action": "Click",
+        "target": [1238, 505],
+        "post_delay": 800,
+        "max_hit": 4,
+        "next": ["NarutoFlowBottomStart", "NarutoFlowBottomFull"],
+        "timeout": 8000
+    },
+    "NarutoFlowBottomStart": {
+        "recognition": "TemplateMatch",
+        "template": "float_menu_start.png",
+        "threshold": 0.68,
+        "roi": [760, 340, 220, 330],
+        "action": "Click",
+        "post_delay": 1000,
+        "focus": "MAA 已识别并点击右下悬浮窗启动按钮"
+    },
+    "NarutoFlowHalf": {
+        "recognition": "TemplateMatch",
+        "template": "float_half.png",
+        "threshold": 0.54,
+        "roi": [1235, 140, 45, 180],
+        "action": "Click",
+        "target": [1265, 222],
+        "post_delay": 1200,
+        "next": "NarutoFlowFull",
+        "timeout": 8000
+    },
+    "NarutoFlowFull": {
+        "recognition": "TemplateMatch",
+        "template": "float_full.png",
+        "threshold": 0.72,
+        "roi": [1170, 100, 110, 500],
+        "action": "Click",
+        "target": [1238, 230],
+        "post_delay": 800,
+        "max_hit": 4,
+        "next": ["NarutoFlowStart", "NarutoFlowFull"],
+        "timeout": 8000
+    },
+    "NarutoFlowStart": {
+        "recognition": "TemplateMatch",
+        "template": "float_menu_start.png",
+        "threshold": 0.68,
+        "roi": [760, 120, 220, 180],
+        "action": "Click",
+        "post_delay": 1000,
+        "focus": "MAA 已连续识别悬浮窗并点击启动"
+    },
+    "NarutoOpenFloat": {
+        "next": ["NarutoOpenBottomHalf", "NarutoOpenBottomFull", "NarutoOpenHalf", "NarutoOpenFull"]
+    },
+    "NarutoOpenBottomHalf": {
+        "recognition": "TemplateMatch",
+        "template": "float_half.png",
+        "threshold": 0.54,
+        "roi": [1235, 340, 45, 330],
+        "action": "Click",
+        "target": [1265, 505],
+        "post_delay": 1200,
+        "next": "NarutoOpenBottomFull"
+    },
+    "NarutoOpenBottomFull": {
+        "recognition": "TemplateMatch",
+        "template": "float_full_mask.png",
+        "threshold": 0.68,
+        "green_mask": true,
+        "roi": [1170, 340, 110, 330],
+        "action": "Click",
+        "target": [1238, 505],
+        "post_delay": 500,
+        "focus": "MAA 已展开固定位置悬浮菜单用于终止符确认"
+    },
+    "NarutoOpenHalf": {
+        "recognition": "TemplateMatch",
+        "template": "float_half.png",
+        "threshold": 0.54,
+        "roi": [1235, 140, 45, 180],
+        "action": "Click",
+        "target": [1265, 222],
+        "post_delay": 1200,
+        "next": "NarutoOpenFull"
+    },
+    "NarutoOpenFull": {
+        "recognition": "TemplateMatch",
+        "template": "float_full.png",
+        "threshold": 0.72,
+        "roi": [1170, 100, 110, 500],
+        "action": "Click",
+        "target": [1238, 230],
+        "post_delay": 500,
+        "focus": "MAA 已展开悬浮菜单用于终止符确认"
+    }
+}

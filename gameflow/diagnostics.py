@@ -253,6 +253,10 @@ def collect_failure_diagnostics(root: Path, config: dict[str, Any], workflow_id:
                 value = str(item.get(key, "")).strip()
                 if value:
                     images.append(Path(expand(value)).name)
+            for value in item.get("process_images", []):
+                value = str(value).strip()
+                if value:
+                    images.append(Path(expand(value)).name)
         for image in list(dict.fromkeys(images))[:6]:
             path = folder / f"window_{_safe_name(image)}.png"
             result = run_window_screenshot(

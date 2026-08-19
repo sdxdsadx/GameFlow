@@ -27,6 +27,31 @@ $smtpUser = [Environment]::GetEnvironmentVariable('GAMEFLOW_SMTP_USER', 'User')
 $smtpAuthCode = [Environment]::GetEnvironmentVariable('GAMEFLOW_SMTP_AUTH_CODE', 'User')
 if ($smtpUser) { $env:GAMEFLOW_SMTP_USER = $smtpUser }
 if ($smtpAuthCode) { $env:GAMEFLOW_SMTP_AUTH_CODE = $smtpAuthCode }
+
+# GameFlow's desktop automation requires the Python environment that contains
+# psutil, pywin32 and pyautogui.  PATH can put the older Python 3.8 installation
+# first; that environment can serve the web page but silently disables every
+# window click, foreground and screenshot operation.  Probe candidates instead
+# of trusting PATH order, and use the same verified runtime for web and CLI runs.
+$pythonCandidates = @(
+    'D:\python\python.exe',
+    (Get-Command python.exe -ErrorAction SilentlyContinue).Source,
+    'C:\Users\26142\AppData\Local\Programs\Python\Python38\python.exe'
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+$python = $null
+foreach ($candidate in $pythonCandidates) {
+    & $candidate -c 'import psutil, win32con, win32gui, pyautogui' 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $python = $candidate
+        break
+    }
+}
+if (-not $python) {
+    throw 'No Python runtime with psutil, pywin32 and pyautogui was found.'
+}
+$pythonw = Join-Path (Split-Path -Parent $python) 'pythonw.exe'
+if (-not (Test-Path -LiteralPath $pythonw)) { $pythonw = $python }
+
 if ($Mode -eq 'web') {
     $existingState = $null
     try {
@@ -55,18 +80,14 @@ if ($Mode -eq 'web') {
             Start-Sleep -Milliseconds 400
         }
     }
-    $pythonw = (Get-Command pythonw.exe -ErrorAction SilentlyContinue).Source
-    if (-not $pythonw) {
-        $pythonw = (Get-Command python.exe).Source
-    }
     Start-Process -FilePath $pythonw -WorkingDirectory $root -ArgumentList @(
         'main.py', '--config', (Join-Path $root 'config\workflow.json'), 'web'
     ) -WindowStyle Hidden
 } else {
     if ($Force) {
-        python main.py run $Mode --force
+        & $python main.py run $Mode --force
     } else {
-        python main.py run $Mode
+        & $python main.py run $Mode
     }
     Read-Host 'Press Enter to close'
 }
