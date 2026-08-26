@@ -16,10 +16,15 @@ def send_daily_screenshots(root: Path, config: dict[str, Any], selected: list[st
                            completed: list[dict[str, str]], started_epoch: float) -> tuple[bool, str]:
     settings = config.get("email_report", {})
     screenshot_map = settings.get("screenshots", {})
+    sent_by_steps = {
+        str(name) for name in settings.get("workflow_step_sends", [])
+    }
     if not settings.get("enabled", False) and not screenshot_map:
         return True, "邮件报告未启用"
     files: list[tuple[str, Path]] = []
     for workflow in selected:
+        if workflow in sent_by_steps:
+            continue
         raw = screenshot_map.get(workflow)
         if not raw:
             continue
@@ -30,6 +35,8 @@ def send_daily_screenshots(root: Path, config: dict[str, Any], selected: list[st
         except OSError:
             continue
     if not files:
+        if selected and all(workflow in sent_by_steps for workflow in selected):
+            return True, "本批截图已由各工作流结束步骤直接发送"
         return False, "本批每日流程没有产生可发送的最新游戏截图"
 
     try:

@@ -563,7 +563,8 @@
                     "error_markers": [
                         "\u4efb\u52a1\u6267\u884c\u5931\u8d25",
                         "\u6267\u884c\u5931\u8d25",
-                        "\u4efb\u52a1\u4e2d\u65ad"
+                        "\u4efb\u52a1\u4e2d\u65ad",
+                        "\u5c1d\u8bd5\u8fd4\u56de\u4e3b\u754c\u9762\u5931\u8d25"
                     ],
                     "timeout": 21600,
                     "retry": 1,
@@ -988,6 +989,8 @@
                         "\u6bcf\u65e5\u5b9e\u8bad\u672a\u5b8c\u6210",
                         "\u5b8c\u6574\u8fd0\u884c\u5931\u8d25",
                         "\u8fd0\u884c\u5f02\u5e38\u7ec8\u6b62",
+                        "\u6fc0\u6d3b\u7a97\u53e3\u65f6\u53d1\u751f\u9519\u8bef",
+                        "Failed to set window foreground",
                         "Traceback (most recent call last)"
                     ],
                     "update_markers": [
@@ -1059,7 +1062,7 @@
                     "executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\MuMuManager.exe",
                     "adb_executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\adb.exe",
                     "adb_server_port": 5038,
-                    "device": "127.0.0.1:16384",
+                    "device": "127.0.0.1:16385",
                     "instance": 0,
                     "timeout": 180,
                     "poll_seconds": 2,
@@ -1098,7 +1101,7 @@
                     "clean_existing": true,
                     "auto_connect_emulator": true,
                     "adb_executable": "D:\\Program Files\\Netease\\MuMu Player 12\\shell\\adb.exe",
-                    "adb_device": "127.0.0.1:16384",
+                    "adb_device": "127.0.0.1:16385",
                     "adb_server_port": 5038,
                     "monitor_emulator": true,
                     "emulator_monitor_interval": 30,
@@ -1115,9 +1118,9 @@
                     "trial_tasks": [
                         {"name": "00 启动 QQ 阅读并关闭开屏弹窗", "enabled": true, "minutes": null, "count": 1},
                         {"name": "00 页面识别检查", "enabled": false, "minutes": null, "count": 1},
-                        {"name": "01 每日自动阅读（默认2次×35分钟）", "enabled": true, "minutes": 35, "count": 2},
-                        {"name": "02 每日听书（默认35分钟，结束后暂停）", "enabled": true, "minutes": 35, "count": 1},
-                        {"name": "03 每日游戏（默认25分钟）", "enabled": true, "minutes": 25, "count": 1},
+                        {"name": "01 每日自动阅读（默认2次×35分钟）", "enabled": false, "minutes": 35, "count": 2},
+                        {"name": "02 每日听书（默认35分钟，结束后暂停）", "enabled": false, "minutes": 35, "count": 1},
+                        {"name": "03 每日游戏（默认25分钟）", "enabled": false, "minutes": 25, "count": 1},
                         {"name": "04 每日广告完整流程（自动至12/12）", "enabled": true, "minutes": null, "count": 1},
                         {"name": "05 外部应用每日流程（大众点评+百度地图）", "enabled": true, "minutes": null, "count": 1},
                         {"name": "06 等级页广告每日流程（赠币+积分）", "enabled": true, "minutes": null, "count": 1},

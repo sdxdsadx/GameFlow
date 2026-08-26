@@ -29,6 +29,18 @@ def _matching_marker(content: str, markers: list[str]) -> str | None:
                  if marker and marker.casefold() in folded), None)
 
 
+def _report_update_notice(ctx: Any, label: str, marker: str,
+                          reported: set[str]) -> None:
+    """Publish an update warning once without terminating the daily run."""
+    key = f"{label}\0{marker}".casefold()
+    if key in reported:
+        return
+    reported.add(key)
+    ctx.log(
+        f"{label}检测到游戏或脚本更新提示：{marker}；"
+        "仅记录提示，继续执行当前每日流程")
+
+
 def _update_skip_result(label: str, step: dict[str, Any], marker: str,
                         details: dict[str, Any] | None = None,
                         *, reason_code: str = "script_or_game_update") -> Result:
@@ -211,11 +223,13 @@ def _screen_looks_like_blue_archive_update(data: bytes,
                    round(width * 0.28):round(width * 0.72)]
     confirm = image[round(height * 0.65):round(height * 0.76),
                     round(width * 0.50):round(width * 0.70)]
+    title_logo = image[0:round(height * 0.22), 0:round(width * 0.30)]
     if dialog.size == 0 or confirm.size == 0:
         return False, {"ba_update_dialog_light_ratio": -1.0,
                        "ba_update_confirm_cyan_ratio": -1.0}
     dialog_hsv = cv2.cvtColor(dialog, cv2.COLOR_BGR2HSV)
     confirm_hsv = cv2.cvtColor(confirm, cv2.COLOR_BGR2HSV)
+    title_logo_hsv = cv2.cvtColor(title_logo, cv2.COLOR_BGR2HSV)
     dialog_light = (
         (dialog_hsv[:, :, 1] <= 70) & (dialog_hsv[:, :, 2] >= 180)
     )
@@ -223,17 +237,31 @@ def _screen_looks_like_blue_archive_update(data: bytes,
         (confirm_hsv[:, :, 0] >= 80) & (confirm_hsv[:, :, 0] <= 105) &
         (confirm_hsv[:, :, 1] >= 80) & (confirm_hsv[:, :, 2] >= 140)
     )
+    title_logo_cyan = (
+        (title_logo_hsv[:, :, 0] >= 80) &
+        (title_logo_hsv[:, :, 0] <= 110) &
+        (title_logo_hsv[:, :, 1] >= 70) &
+        (title_logo_hsv[:, :, 2] >= 120)
+    )
     dialog_light_ratio = float(np.mean(dialog_light))
     confirm_cyan_ratio = float(np.mean(confirm_cyan))
+    title_logo_cyan_ratio = float(np.mean(title_logo_cyan))
     metrics = {
         "ba_update_dialog_light_ratio": round(dialog_light_ratio, 5),
         "ba_update_confirm_cyan_ratio": round(confirm_cyan_ratio, 5),
+        "ba_update_title_logo_cyan_ratio": round(title_logo_cyan_ratio, 5),
     }
+    title_logo_ok = (
+        not step.get("ba_update_require_title_logo", False)
+        or title_logo_cyan_ratio >= float(
+            step.get("ba_update_title_logo_cyan_ratio", 0.20))
+    )
     return (
         dialog_light_ratio >= float(
             step.get("ba_update_dialog_light_ratio", 0.75))
         and confirm_cyan_ratio >= float(
-            step.get("ba_update_confirm_cyan_ratio", 0.60)),
+            step.get("ba_update_confirm_cyan_ratio", 0.60))
+        and title_logo_ok,
         metrics,
     )
 
@@ -499,6 +527,8 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     marker = str(step.get("completion_marker", "AllTasksCompleted"))
     error_markers = [str(x) for x in step.get("error_markers", ["TaskChainError", "AllTasksError"])]
     update_markers = [str(x) for x in step.get("update_markers", [])]
+    update_notice_only = bool(step.get("update_notice_only", False))
+    reported_updates: set[str] = set()
     maintenance_markers = [str(x) for x in step.get("maintenance_markers", [])]
     asst_start_markers = [str(x) for x in step.get(
         "asst_start_markers", ['"taskchain":', "Start Task Chain"])]
@@ -566,12 +596,16 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                 (name for name in update_process_images
                  if _process_image_exists([name])), None)
             if update_process is not None:
-                return _update_skip_result(
-                    "MAA", step, f"检测到更新进程 {update_process}",
-                    {"process_image": update_process,
-                     "evidence": (str(watchdog.latest_path)
-                                  if watchdog.latest_path.exists() else None)},
-                    reason_code="script_update")
+                update_text = f"检测到更新进程 {update_process}"
+                if update_notice_only:
+                    _report_update_notice(ctx, "MAA", update_text, reported_updates)
+                else:
+                    return _update_skip_result(
+                        "MAA", step, update_text,
+                        {"process_image": update_process,
+                         "evidence": (str(watchdog.latest_path)
+                                      if watchdog.latest_path.exists() else None)},
+                        reason_code="script_update")
             if gui_log_path is not None and gui_log_path.exists():
                 gui_size = gui_log_path.stat().st_size
                 if gui_size < gui_position:
@@ -583,10 +617,14 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                     gui_position = gui_size
                     update_marker = _matching_marker(gui_chunk, update_markers)
                     if update_marker:
-                        return _update_skip_result(
-                            "MAA", step, update_marker,
-                            {"log": str(gui_log_path)},
-                            reason_code="script_update")
+                        if update_notice_only:
+                            _report_update_notice(
+                                ctx, "MAA", update_marker, reported_updates)
+                        else:
+                            return _update_skip_result(
+                                "MAA", step, update_marker,
+                                {"log": str(gui_log_path)},
+                                reason_code="script_update")
                     maintenance_marker = _matching_marker(
                         gui_chunk, maintenance_markers)
                     if maintenance_marker:
@@ -625,10 +663,14 @@ def run_maa_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                     tail = (tail + text_chunk)[-12000:]
                     update_marker = _matching_marker(text_chunk, update_markers)
                     if update_marker:
-                        return _update_skip_result(
-                            "MAA", step, update_marker,
-                            {"log": str(log_path)},
-                            reason_code="script_update")
+                        if update_notice_only:
+                            _report_update_notice(
+                                ctx, "MAA", update_marker, reported_updates)
+                        else:
+                            return _update_skip_result(
+                                "MAA", step, update_marker,
+                                {"log": str(log_path)},
+                                reason_code="script_update")
                     maintenance_marker = _matching_marker(
                         text_chunk, maintenance_markers)
                     if maintenance_marker:
@@ -711,7 +753,15 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     marker = str(step.get("completion_marker", "任务全部执行成功"))
     error_markers = [str(x) for x in step.get("error_markers", ["任务全部执行失败"])]
     ignored_error_markers = [str(x) for x in step.get("ignored_error_markers", [])]
-    update_markers = [str(x) for x in step.get("update_markers", [])]
+    # BAAS' own release/update notices are deliberately outside the daily
+    # workflow contract. Only explicit game-client markers may stop the run.
+    legacy_update_markers = (
+        [] if step.get("ignore_script_updates", False)
+        else step.get("update_markers", []))
+    game_update_markers = [str(x) for x in step.get(
+        "game_update_markers", legacy_update_markers)]
+    update_notice_only = bool(step.get("update_notice_only", False))
+    reported_updates: set[str] = set()
     maintenance_markers = [str(x) for x in step.get("maintenance_markers", [])]
     recoverable_markers = [str(x) for x in step.get("recoverable_error_markers", [
         "RestartTaskException: ATX卡死，重启任务", "ATX卡死，开始重启ATX",
@@ -835,6 +885,10 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     start_click_protection_seconds = max(
         0.0, float(step.get("start_click_protection_seconds", 60)))
     start_click_protection_until = 0.0
+    game_update_screen_detection = bool(step.get(
+        "game_update_screen_detection",
+        step.get("update_screen_detection", False))
+        or step.get("login_download_confirm_detection", False))
 
     def retry_game_network_dialog() -> Result | None:
         """Detect Blue Archive's 101404 modal and tap its dark Retry button."""
@@ -917,7 +971,7 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
             proc.terminate()
 
     def inspect_game_startup_screen() -> dict[str, Any] | None:
-        if not step.get("update_screen_detection", False):
+        if not game_update_screen_detection:
             return None
         watchdog.poll(force=True)
         if not watchdog.latest_path.exists():
@@ -1011,12 +1065,16 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                     existing[name] = size
                     content = chunk.decode("utf-8", errors="replace")
                     tails[name] = (tails.get(name, "") + content)[-16000:]
-                    update_marker = _matching_marker(content, update_markers)
+                    update_marker = _matching_marker(content, game_update_markers)
                     if update_marker:
-                        return _update_skip_result(
-                            "碧蓝档案", step, update_marker,
-                            {"log": name, "evidence_type": "log"},
-                            reason_code="game_or_script_update")
+                        if update_notice_only:
+                            _report_update_notice(
+                                ctx, "碧蓝档案", update_marker, reported_updates)
+                        else:
+                            return _update_skip_result(
+                                "碧蓝档案", step, update_marker,
+                                {"log": name, "evidence_type": "log"},
+                                reason_code="game_update")
                     maintenance_marker = _matching_marker(content, maintenance_markers)
                     if maintenance_marker:
                         return _maintenance_skip_result(
@@ -1220,9 +1278,14 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                             reported_ignored_errors.add(warning)
                             ctx.log(f"BAAS 报告非致命提示：{warning}；继续等待完整每日流程结束")
             now = time.monotonic()
-            if (step.get("update_screen_detection", False)
+            if (game_update_screen_detection
                     and now >= next_update_screen_check_at
-                    and (not run_started or recoverable_events > 0
+                    # A recoverable ATX event sets run_started=False below.  Once
+                    # fresh BAAS task logs arrive, do not keep probing ordinary
+                    # in-game dialogs merely because the historical event count
+                    # is still non-zero; that can misclassify normal cyan popups
+                    # as the login download confirmation.
+                    and (not run_started
                          or game_update_started_at is not None)):
                 next_update_screen_check_at = now + update_screen_interval
                 screen_state = inspect_game_startup_screen()
@@ -1236,6 +1299,15 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                         f"（{update_screen_matches}/{update_screen_confirm_count}）")
                     if update_screen_matches >= update_screen_confirm_count:
                         if update_confirm_clicks >= max_update_confirm_clicks:
+                            if update_notice_only:
+                                _report_update_notice(
+                                    ctx, "碧蓝档案", "更新确认框重复出现",
+                                    reported_updates)
+                                return Result(
+                                    False,
+                                    "碧蓝档案更新确认框重复出现，重启本流程继续处理",
+                                    {"update_confirm_clicks": update_confirm_clicks,
+                                     "retry_step": True, **screen_state})
                             return _update_skip_result(
                                 "碧蓝档案", step, "更新确认框重复出现",
                                 {"update_confirm_clicks": update_confirm_clicks,
@@ -1301,6 +1373,14 @@ def run_baas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
             if (game_update_started_at is not None
                     and now - game_update_started_at >= game_update_timeout):
                 screen_state = inspect_game_startup_screen() or {}
+                if update_notice_only:
+                    _report_update_notice(
+                        ctx, "碧蓝档案", "游戏更新下载超时", reported_updates)
+                    return Result(
+                        False, "碧蓝档案游戏更新下载超时，重启本流程继续处理",
+                        {"game_update_seconds": now - game_update_started_at,
+                         "update_confirm_clicks": update_confirm_clicks,
+                         "retry_step": True, **screen_state})
                 return _update_skip_result(
                     "碧蓝档案", step, "游戏更新下载超时",
                     {"game_update_seconds": now - game_update_started_at,
@@ -2191,13 +2271,17 @@ def run_alas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
         subprocess.run(["taskkill", "/IM", process_image, "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        creationflags=subprocess.CREATE_NO_WINDOW)
-        time.sleep(0.5)
+        # Electron keeps its single-instance lock briefly after taskkill.  If
+        # the launcher is restarted during that window it exits with code 0
+        # without creating either the GUI or a new log file.
+        time.sleep(max(0.5, float(step.get("clean_existing_settle_seconds", 5))))
     existing = {name: Path(name).stat().st_size for name in glob.glob(log_glob)}
     launch_env = os.environ.copy()
     launch_env.update({str(k): expand(str(v)) for k, v in step.get("env", {}).items()})
     try:
-        proc = subprocess.Popen([str(exe)], cwd=str(exe.parent), env=launch_env,
-                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        # Alas.exe is an Electron GUI bootstrapper.  CREATE_NO_WINDOW makes
+        # some releases quit cleanly before spawning toolkit/webapp/alas.exe.
+        proc = subprocess.Popen([str(exe)], cwd=str(exe.parent), env=launch_env)
     except OSError as exc:
         return Result(False, f"无法启动 AzurLaneAutoScript：{exc}")
     # This runtime flag belongs to the workflow run, not every retry attempt.
@@ -2210,7 +2294,14 @@ def run_alas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
         "error_markers", ["No emulator with serial", "无法连接至ADB服务",
                           "Request human takeover", "RequestHumanTakeover",
                           "ScriptError", "GameNotRunningError"])]
-    update_markers = [str(x) for x in step.get("update_markers", [])]
+    # ALAS' own release/update notices must never decide the daily result.
+    # Only explicit game-client markers configured for this workflow may stop
+    # the run as "needs update".
+    game_update_markers = [
+        str(x) for x in step.get("game_update_markers", [])
+    ]
+    update_notice_only = bool(step.get("update_notice_only", False))
+    reported_updates: set[str] = set()
     maintenance_markers = [str(x) for x in step.get("maintenance_markers", [])]
     restart_markers = [str(x) for x in step.get(
         "restart_emulator_markers", ["No emulator with serial", "无法连接至ADB服务",
@@ -2234,6 +2325,9 @@ def run_alas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     tails = {}
     last_log = None
     last_log_activity_at = started_at
+    launcher_exited_at = None
+    launcher_exit_grace_seconds = max(
+        1.0, float(step.get("launcher_exit_grace_seconds", 20)))
     watchdog = EmulatorBlackScreenWatchdog(step, ctx, "碧蓝航线模拟器")
 
     def recover_updated_login_page() -> tuple[bool, str]:
@@ -2303,14 +2397,18 @@ def run_alas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                 last_log = name
                 last_log_activity_at = time.monotonic()
                 next_log_retry_at = time.monotonic() + log_retry_interval
-                update_marker = _matching_marker(content, update_markers)
+                update_marker = _matching_marker(content, game_update_markers)
                 if update_marker:
-                    return _update_skip_result(
-                        "碧蓝航线", step, update_marker,
-                        {"log": name,
-                         "evidence": (str(watchdog.latest_path)
-                                      if watchdog.latest_path.exists() else None)},
-                        reason_code="game_update")
+                    if update_notice_only:
+                        _report_update_notice(
+                            ctx, "碧蓝航线", update_marker, reported_updates)
+                    else:
+                        return _update_skip_result(
+                            "碧蓝航线", step, update_marker,
+                            {"log": name,
+                             "evidence": (str(watchdog.latest_path)
+                                          if watchdog.latest_path.exists() else None)},
+                            reason_code="game_update")
                 maintenance_marker = _matching_marker(content, maintenance_markers)
                 if maintenance_marker:
                     return _maintenance_skip_result(
@@ -2409,8 +2507,27 @@ def run_alas_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                 if not clicked:
                     return Result(False, message)
                 next_log_retry_at = time.monotonic() + log_retry_interval
-            if proc.poll() is not None and not _process_image_exists([process_image]):
-                return Result(False, f"AzurLaneAutoScript 提前退出（退出码 {proc.returncode}）")
+            if proc.poll() is not None and not run_started and last_log is None:
+                if _process_image_exists([process_image]):
+                    launcher_exited_at = None
+                else:
+                    if launcher_exited_at is None:
+                        launcher_exited_at = time.monotonic()
+                        ctx.log(
+                            "ALAS 启动器已完成引导，等待 Electron GUI/后台进程接管")
+                    elif (time.monotonic() - launcher_exited_at
+                          >= launcher_exit_grace_seconds):
+                        return Result(
+                            False,
+                            f"AzurLaneAutoScript 启动器退出后 {launcher_exit_grace_seconds:g} "
+                            "秒仍未产生 GUI 或后台进程",
+                            {"launcher_exit_code": proc.returncode,
+                             "launcher_exit_grace_seconds": launcher_exit_grace_seconds})
+            else:
+                # New scheduler log output is stronger liveness evidence than
+                # the Electron process name: ALAS keeps its worker in Python
+                # after the visible launcher hands off or closes.
+                launcher_exited_at = None
         return Result(False, f"等待 AzurLaneAutoScript 完成超时（{timeout} 秒）")
     finally:
         if step.get("close_on_complete", True):
@@ -2625,6 +2742,15 @@ def _naruto_lobby_icon_metrics(image, reference_paths, *,
         "lobby_icon_match_count": len(matches),
         "home_page": len(matches) >= min_matches,
     }
+
+
+def _naruto_reward_page_eligible(metrics: dict[str, Any], *,
+                                 lobby_visible: bool,
+                                 reward_clicks: int,
+                                 allow_initial: bool = False) -> bool:
+    """Gate coarse reward-page colours behind a verified navigation action."""
+    return (bool(metrics.get("reward_page")) and not lobby_visible
+            and (reward_clicks > 0 or allow_initial))
 
 
 def _naruto_role_name_metrics(image, reference_paths, *,
@@ -4939,7 +5065,13 @@ def run_naruto_shadow(step: dict[str, Any], ctx: RunContext) -> Result:
 
 
 def run_naruto_reward_verify(step: dict[str, Any], ctx: RunContext) -> Result:
-    """Open Rewards at its fixed home coordinate and confirm all four daily chests are open."""
+    """Wait for the real lobby, then verify all four daily reward chests.
+
+    MaaAutoNaruto can emit its final marker while the last asynchronous arena
+    fight is still on screen.  Clicking the fixed Rewards coordinate at that
+    point hits a battle skill instead.  Keep observing until stable lobby icons
+    (and, when configured, the expected account name) are visible.
+    """
     try:
         import cv2
         import numpy as np
@@ -4947,7 +5079,15 @@ def run_naruto_reward_verify(step: dict[str, Any], ctx: RunContext) -> Result:
         return Result(False, f"火影奖励验证需要 OpenCV：{exc}")
     adb = ctx.tool("adb")
     device = str(step.get("device", "emulator-5554"))
-    timeout = int(step.get("timeout", 45))
+    timeout = int(step.get("timeout", 900))
+    poll_seconds = max(1.0, float(step.get("poll_seconds", 10)))
+    page_wait = max(1.0, float(step.get("page_wait", 5)))
+    reference_paths = step.get("lobby_reference_paths", [])
+    lobby_threshold = float(step.get("lobby_icon_threshold", 0.50))
+    lobby_min_matches = int(step.get("lobby_icon_min_matches", 3))
+    role_name_check = bool(step.get("lobby_role_name_check", True))
+    role_name_threshold = float(step.get("lobby_role_name_threshold", 0.62))
+    max_reward_clicks = max(1, int(step.get("max_reward_clicks", 3)))
     evidence = Path(expand(str(step.get(
         "evidence_path", ctx.root / "logs" / "naruto_activity_check.png"))))
     evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -4964,37 +5104,81 @@ def run_naruto_reward_verify(step: dict[str, Any], ctx: RunContext) -> Result:
         image = cv2.imdecode(np.frombuffer(done.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
         return (Result(True, "截图成功"), image) if image is not None else (Result(False, "无法解析模拟器截图"), None)
 
-    shot_result, image = capture()
-    if not shot_result.success:
-        return shot_result
-    metrics = _naruto_visual_metrics(image)
-    if not metrics["landscape"]:
-        cv2.imwrite(str(evidence), image)
-        return Result(False, "火影奖励核验时仍停留在竖屏应用，影分身任务未正确进入游戏",
-                      {"evidence": str(evidence), **metrics})
-    if not metrics["reward_page"]:
-        x = round(image.shape[1] * float(step.get("reward_x_ratio", 1230 / 1280)))
-        y = round(image.shape[0] * float(step.get("reward_y_ratio", 363 / 720)))
-        ctx.log(f"点击火影主页“奖励”固定位置：({x}, {y})")
-        click = subprocess.run([adb, "-s", device, "shell", "input", "tap", str(x), str(y)],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-        if click.returncode != 0:
-            return Result(False, "点击火影主页“奖励”失败")
-        if ctx.stop_event.wait(float(step.get("page_wait", 5))):
-            return Result(False, "任务被用户停止")
+    started = time.monotonic()
+    reward_clicks = 0
+    last_details: dict[str, Any] = {"evidence": str(evidence)}
+    last_wait_state = None
+    while time.monotonic() - started <= timeout:
         shot_result, image = capture()
         if not shot_result.success:
             return shot_result
         metrics = _naruto_visual_metrics(image)
+        if image is not None:
+            cv2.imwrite(str(evidence), image)
+        if not metrics["landscape"]:
+            return Result(False, "火影奖励核验时仍停留在竖屏应用，MFA 任务未正确进入游戏",
+                          {"evidence": str(evidence), **metrics})
 
-    cv2.imwrite(str(evidence), image)
-    details = {"evidence": str(evidence), **metrics}
-    if not metrics["reward_page"]:
-        return Result(False, "点击后未能确认进入火影每日奖励页", details)
-    if not metrics["all_chests_claimed"]:
-        return Result(False, "每日奖励的四个宝箱尚未全部领取", details)
-    return Result(True, "已确认每日活跃度达到 100，四个日常宝箱均已领取", details)
+        icon_metrics = (_naruto_lobby_icon_metrics(
+            image, reference_paths, threshold=lobby_threshold,
+            min_matches=lobby_min_matches) if reference_paths else {})
+        role_metrics = (_naruto_role_name_metrics(
+            image, reference_paths, threshold=role_name_threshold)
+            if reference_paths else {})
+        lobby_visible = (bool(icon_metrics.get("home_page"))
+                         if reference_paths else bool(metrics.get("home_page")))
+        role_matches = (not role_name_check
+                        or not reference_paths
+                        or bool(role_metrics.get("role_name_match")))
+        last_details = {"evidence": str(evidence), "reward_clicks": reward_clicks,
+                        **metrics, **icon_metrics, **role_metrics}
+
+        # Saturated battle controls can occupy the same four lower-screen
+        # regions as the daily chests.  Never accept a reward-page colour
+        # match before this verifier has positively identified the lobby and
+        # clicked its Rewards entry.  Also prefer a confirmed lobby over the
+        # coarse colour heuristic when both happen to match.
+        if _naruto_reward_page_eligible(
+                metrics, lobby_visible=lobby_visible,
+                reward_clicks=reward_clicks,
+                allow_initial=bool(step.get("allow_initial_reward_page", False))):
+            details = dict(last_details)
+            if not metrics["all_chests_claimed"]:
+                return Result(False, "每日奖励的四个宝箱尚未全部领取", details)
+            return Result(True, "已确认每日活跃度达到 100，四个日常宝箱均已领取", details)
+
+        if lobby_visible and not role_matches:
+            return Result(False, "火影大厅角色名校验失败：需要“南部清和”", last_details)
+        if lobby_visible:
+            if reward_clicks >= max_reward_clicks:
+                return Result(False, "已确认火影大厅，但多次点击后仍未进入每日奖励页",
+                              last_details)
+            x = round(image.shape[1] * float(step.get("reward_x_ratio", 1230 / 1280)))
+            y = round(image.shape[0] * float(step.get("reward_y_ratio", 363 / 720)))
+            reward_clicks += 1
+            ctx.log(f"已确认火影大厅和角色名，第 {reward_clicks} 次点击“奖励”：({x}, {y})")
+            click = subprocess.run(
+                [adb, "-s", device, "shell", "input", "tap", str(x), str(y)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            if click.returncode != 0:
+                return Result(False, "点击火影主页“奖励”失败", last_details)
+            if ctx.stop_event.wait(page_wait):
+                return Result(False, "任务被用户停止")
+            continue
+
+        wait_state = ("战斗或其他游戏页面",
+                      int(icon_metrics.get("lobby_icon_match_count", 0)))
+        if wait_state != last_wait_state:
+            ctx.log(
+                "火影完成日志已出现，但尚未回到可验证大厅；"
+                f"固定大厅图标匹配 {wait_state[1]}/{lobby_min_matches}，继续等待")
+            last_wait_state = wait_state
+        if ctx.stop_event.wait(poll_seconds):
+            return Result(False, "任务被用户停止")
+
+    return Result(False, f"等待火影返回大厅并核验奖励超时（{timeout} 秒）",
+                  last_details)
 
 
 @_serialized_desktop_click
@@ -5003,11 +5187,65 @@ def _click_alas_start_button(root_pid: int, x_ratio: float, y_ratio: float) -> t
     if os.name != "nt":
         return False, "ALAS GUI 备用点击只支持 Windows"
     try:
+        import psutil
         import win32con
         import win32gui
         import win32process
-    except ImportError as exc:
-        return False, f"缺少 Windows GUI 自动化组件：{exc}"
+    except ImportError:
+        # Keep ALAS usable on the lightweight Python runtime bundled with this
+        # project, where pywin32 is not installed.  The Electron window has a
+        # stable title, so native user32 calls are sufficient for the guarded
+        # coordinate fallback.
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            matches = []
+            enum_type = ctypes.WINFUNCTYPE(
+                wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+            def collect_native(hwnd, _):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length <= 0:
+                    return True
+                title_buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, title_buffer, length + 1)
+                title = title_buffer.value.strip()
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                rect = wintypes.RECT()
+                if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    return True
+                area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+                if area > 10000 and (title.casefold() == "alas" or pid.value == root_pid):
+                    matches.append((10 if title.casefold() == "alas" else 1,
+                                    area, hwnd, title, rect))
+                return True
+
+            callback = enum_type(collect_native)
+            user32.EnumWindows(callback, 0)
+            if not matches:
+                return False, "ALAS 未产生可见窗口，无法点击“启动”"
+            _, _, hwnd, title, rect = max(matches)
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.4)
+            live_rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(live_rect))
+            x = live_rect.left + round(
+                (live_rect.right - live_rect.left) * min(max(x_ratio, 0.0), 1.0))
+            y = live_rect.top + round(
+                (live_rect.bottom - live_rect.top) * min(max(y_ratio, 0.0), 1.0))
+            user32.SetCursorPos(x, y)
+            user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+            user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+            return True, f"已将“{title}”置于前台并点击“启动”位置（{x}, {y}）"
+        except Exception as exc:
+            return False, f"ALAS 原生窗口备用点击失败：{exc}"
     candidates = []
 
     def collect(hwnd, _):
@@ -5056,6 +5294,7 @@ def _click_maaend_start_button(root_pid: int, x_ratio: float, y_ratio: float) ->
     if os.name != "nt":
         return False, "MaaEnd GUI 备用点击只支持 Windows"
     try:
+        import psutil
         import win32con
         import win32gui
         import win32process
@@ -5072,36 +5311,50 @@ def _click_maaend_start_button(root_pid: int, x_ratio: float, y_ratio: float) ->
             rect = win32gui.GetWindowRect(hwnd)
             area = max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
             if area > 10000:
-                candidates.append((10 if "MAAEND" in title.upper() else 1,
-                                   area, hwnd, title, rect))
+                try:
+                    created_at = float(psutil.Process(pid).create_time())
+                except psutil.Error:
+                    created_at = 0.0
+                # Multiple MaaEnd windows may coexist while an updater-owned
+                # elevated instance is still downloading.  Prefer the window
+                # created by this runner; choosing the larger title-only
+                # window can hit UIPI "access denied" forever.
+                candidates.append((100 if pid == root_pid else
+                                   (10 if "MAAEND" in title.upper() else 1),
+                                   created_at, area, hwnd, title, rect))
 
     win32gui.EnumWindows(collect, None)
     if not candidates:
         return False, "MaaEnd 未产生可见窗口，无法点击“开始任务”"
-    _, _, hwnd, title, rect = max(candidates)
-    focused, focus_message = _focus_window_before_click(hwnd, title or "MaaEnd")
-    if not focused:
-        return False, focus_message
-    rect = win32gui.GetWindowRect(hwnd)
-    try:
-        from pywinauto import Application
-        window = Application(backend="uia").connect(handle=hwnd, timeout=3).window(handle=hwnd)
-        for control in window.descendants(control_type="Button"):
-            name = control.window_text().strip()
-            if name in ("开始任务", "启动任务", "开始", "Start Tasks"):
-                control.click_input()
-                return True, f"已通过 GUI 控件点击 MaaEnd“{name}”按钮"
-    except Exception:
-        pass
-    left, top, right, bottom = rect
-    x = left + round((right - left) * min(max(x_ratio, 0.0), 1.0))
-    y = top + round((bottom - top) * min(max(y_ratio, 0.0), 1.0))
-    try:
-        import pyautogui
-        pyautogui.click(x, y)
-        return True, f"已在“{title}”窗口点击“开始任务”（{x}, {y}）"
-    except Exception as exc:
-        return False, f"MaaEnd GUI 备用点击失败：{exc}"
+    errors = []
+    for _, _, _, hwnd, title, rect in sorted(candidates, reverse=True):
+        focused, focus_message = _focus_window_before_click(
+            hwnd, title or "MaaEnd")
+        if not focused:
+            errors.append(focus_message)
+            continue
+        rect = win32gui.GetWindowRect(hwnd)
+        try:
+            from pywinauto import Application
+            window = Application(backend="uia").connect(
+                handle=hwnd, timeout=3).window(handle=hwnd)
+            for control in window.descendants(control_type="Button"):
+                name = control.window_text().strip()
+                if name in ("开始任务", "启动任务", "开始", "Start Tasks"):
+                    control.click_input()
+                    return True, f"已通过 GUI 控件点击 MaaEnd“{name}”按钮"
+        except Exception as exc:
+            errors.append(f"{title or hwnd} 控件点击失败：{exc}")
+        left, top, right, bottom = rect
+        x = left + round((right - left) * min(max(x_ratio, 0.0), 1.0))
+        y = top + round((bottom - top) * min(max(y_ratio, 0.0), 1.0))
+        try:
+            import pyautogui
+            pyautogui.click(x, y)
+            return True, f"已在“{title}”窗口点击“开始任务”（{x}, {y}）"
+        except Exception as exc:
+            errors.append(f"{title or hwnd} 坐标点击失败：{exc}")
+    return False, "；".join(errors[-3:]) or "MaaEnd 窗口均不可操作"
 
 
 @_serialized_desktop_click
@@ -5404,10 +5657,38 @@ def _bring_game_window_to_front(process_image: str, title_contains: str,
             return Result(False, "任务被用户停止")
 
 
+def _refresh_mumu_gui_device(step: dict[str, Any]) -> str:
+    """Discover MuMu's current per-instance ADB port when available."""
+    manager_value = str(step.get("mumu_manager_executable", "")).strip()
+    if not manager_value:
+        return str(step.get("adb_device", step.get("device", ""))).strip()
+    manager = expand(manager_value)
+    if not Path(manager).exists():
+        return str(step.get("adb_device", step.get("device", ""))).strip()
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        info = subprocess.run(
+            [manager, "info", "--vmindex", str(step.get("mumu_instance", 0))],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10,
+            creationflags=flags)
+        payload = json.loads(info.stdout.decode("utf-8", errors="replace"))
+        host = str(payload.get("adb_host_ip") or "127.0.0.1")
+        port = int(payload.get("adb_port") or 0)
+        if info.returncode == 0 and 0 < port < 65536:
+            device = f"{host}:{port}"
+            step["adb_device"] = device
+            step["device"] = device
+            return device
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError,
+            json.JSONDecodeError):
+        pass
+    return str(step.get("adb_device", step.get("device", ""))).strip()
+
+
 def _probe_gui_emulator_adb(step: dict[str, Any]) -> tuple[bool, str]:
     """Probe the emulator endpoint used by a desktop assistant GUI."""
     adb_value = str(step.get("adb_executable", "")).strip()
-    device = str(step.get("adb_device", step.get("device", ""))).strip()
+    device = _refresh_mumu_gui_device(step)
     if not adb_value or not device:
         return False, "未配置 QQ 阅读 GUI 的 adb_executable 或 adb_device"
     adb = expand(adb_value)
@@ -5438,7 +5719,7 @@ def _probe_gui_emulator_adb(step: dict[str, Any]) -> tuple[bool, str]:
 def _capture_gui_emulator_screen(step: dict[str, Any], path: Path) -> tuple[bool, bool, str]:
     """Capture the GUI's emulator frame and report whether it is effectively black."""
     adb_value = str(step.get("adb_executable", "")).strip()
-    device = str(step.get("adb_device", step.get("device", ""))).strip()
+    device = _refresh_mumu_gui_device(step)
     if not adb_value or not device:
         return False, False, "未配置 ADB 路径或设备地址"
     adb = expand(adb_value)
@@ -5522,6 +5803,131 @@ def _auto_connect_gui_emulator(step: dict[str, Any], proc: subprocess.Popen,
     return False, f"{timeout:g} 秒内未能完成 GUI 模拟器连接：{last_message}"
 
 
+def _run_captcha_solver(step: dict[str, Any], ctx: RunContext) -> tuple[bool, str]:
+    """Solve the QQ Reader ordered-image CAPTCHA via the offline solver.
+
+    The solver captures the emulator, matches the top gray prompt icons to the
+    colored candidate tiles in order, taps them with the local MaaFramework
+    controller, then submits.  This is the "auto click the verification code"
+    path requested for the ad flow.
+    """
+    enabled = bool(step.get("auto_solve_captcha", False))
+    if not enabled:
+        return False, "未启用验证码自动求解"
+    python = expand(str(step.get(
+        "captcha_solver_python",
+        r"G:\project_X\.venv-captcha\Scripts\python.exe")))
+    solver = expand(str(step.get(
+        "captcha_solver_script",
+        r"G:\project_X\tools\captcha_solver.py")))
+    if not Path(python).exists() or not Path(solver).exists():
+        return False, f"验证码求解器不可用：{python} / {solver}"
+    adb = expand(str(step.get("captcha_adb", step.get(
+        "adb_executable", r"G:\project_X\captcha_adb"))))
+    device = str(step.get("captcha_device", step.get(
+        "adb_device", "127.0.0.1:16384")))
+    if not Path(adb).exists():
+        return False, f"验证码求解 ADB 不可用：{adb}"
+    env = os.environ.copy()
+    if step.get("adb_server_port") is not None:
+        env["ANDROID_ADB_SERVER_PORT"] = str(step["adb_server_port"])
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        completed = subprocess.run(
+            [python, solver, "--adb", adb, "--device", device,
+             "--submit", "--click-engine",
+             str(step.get("captcha_click_engine", "maa"))],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=float(step.get("captcha_solver_timeout", 70)),
+            env=env, creationflags=flags)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"调用验证码求解器异常：{exc}"
+    tail = (completed.stdout + completed.stderr).strip()
+    tail = tail[-800:] if len(tail) > 800 else tail
+    # The solver prints a JSON line: {"captcha_layout":false} when the frame is
+    # not a usable challenge, or a full result dict when solved/submitted.
+    parsed: dict[str, object] = {}
+    for line in reversed((completed.stdout + completed.stderr).splitlines()):
+        try:
+            parsed = json.loads(line)
+            break
+        except (json.JSONDecodeError, TypeError):
+            continue
+    if parsed.get("captcha_layout") is False:
+        ctx.log(f"{step.get('display_name', '脚本')}验证码求解：当前帧未识别出验证码布局，"
+                f"等待稳定帧。{tail}")
+        return True, "验证码事件尚未稳定，等待后续重试"
+    submitted = bool(parsed.get("submitted"))
+    still_visible = bool(parsed.get("captcha_still_visible"))
+    if submitted and not still_visible:
+        ctx.log(f"{step.get('display_name', '脚本')}验证码已按顺序点选并提交成功。")
+        return True, "验证码自动点选并提交成功"
+    ctx.log(f"{step.get('display_name', '脚本')}验证码求解未确认成功：{tail}")
+    return False, "验证码自动求解未确认成功"
+
+
+def _run_ad_locator(step: dict[str, Any], ctx: RunContext) -> tuple[bool, str]:
+    """Locate the QQ Reader ad div and click the watch button inside it.
+
+    Fallback for the case where Maa's ``AdClickWatch``/``AdVideoCounterVisible``
+    nodes cannot find the ad entry (the reward page may be scrolled away or the
+    button text is not being matched).  It reads Maa's latest OCR boxes from the
+    log, reconstructs the ad card, and clicks the right-side watch button via the
+    local MaaFramework controller.
+    """
+    enabled = bool(step.get("auto_locate_ad", False))
+    if not enabled:
+        return False, "未启用广告入口定位"
+    python = expand(str(step.get(
+        "ad_locator_python",
+        r"G:\project_X\.venv-captcha\Scripts\python.exe")))
+    locator = expand(str(step.get(
+        "ad_locator_script",
+        r"G:\project_X\tools\ad_locator.py")))
+    log_path = expand(str(step.get("ad_locator_log", step.get(
+        "log_glob", r"G:\project_X\dev\debug\maafw.log"))))
+    if "*" in log_path or "?" in log_path:
+        matches = sorted(glob.glob(log_path))
+        log_path = matches[-1] if matches else log_path
+    if not Path(python).exists() or not Path(locator).exists() or not Path(log_path).exists():
+        return False, f"广告定位器不可用：{python} / {locator} / {log_path}"
+    adb = expand(str(step.get("ad_locator_adb", step.get(
+        "adb_executable", r"G:\project_X\captcha_adb"))))
+    device = str(step.get("ad_locator_device", step.get(
+        "adb_device", "127.0.0.1:16384")))
+    if not Path(adb).exists():
+        return False, f"广告定位 ADB 不可用：{adb}"
+    env = os.environ.copy()
+    if step.get("adb_server_port") is not None:
+        env["ANDROID_ADB_SERVER_PORT"] = str(step["adb_server_port"])
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        completed = subprocess.run(
+            [python, locator, "--log", log_path,
+             "--adb", adb, "--device", device,
+             "--click", "--click-engine",
+             str(step.get("ad_locator_click_engine", "maa"))],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=float(step.get("ad_locator_timeout", 45)),
+            env=env, creationflags=flags)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"调用广告定位器异常：{exc}"
+    parsed: dict[str, object] = {}
+    for line in reversed((completed.stdout + completed.stderr).splitlines()):
+        try:
+            parsed = json.loads(line)
+            break
+        except (json.JSONDecodeError, TypeError):
+            continue
+    if parsed.get("found") and parsed.get("clicked"):
+        ctx.log(f"{step.get('display_name', '脚本')}已定位广告卡片并点击观看按钮："
+                f"{parsed.get('method', '')} @ {parsed.get('point')}")
+        return True, "广告入口已定位并点击"
+    ctx.log(f"{step.get('display_name', '脚本')}广告入口定位未确认："
+            f"{str(parsed.get('error') or completed.stdout)[-400:]}")
+    return False, "广告入口定位未确认"
+
+
 def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
     """Run a desktop daily assistant, retry its start button, and follow fresh logs."""
     display_name = str(step.get("display_name", "每日脚本"))
@@ -5537,11 +5943,71 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
             subprocess.run(["taskkill", "/IM", image_name, "/T", "/F"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            creationflags=subprocess.CREATE_NO_WINDOW)
-        time.sleep(0.5)
+        time.sleep(max(0.5, float(step.get("clean_existing_settle_seconds", 0.5))))
+
+    # Some assistants regenerate their task list after an update.  Re-apply
+    # known-broken optional tasks before every launch so an external updater
+    # cannot silently re-enable a workflow that repeatedly blocks the queue.
+    instance_config_text = str(step.get("instance_config", "")).strip()
+    disabled_task_entries = {
+        str(value).strip() for value in step.get("disabled_task_entries", [])
+        if str(value).strip()
+    }
+    enabled_task_entries = {
+        str(value).strip() for value in step.get("enabled_task_entries", [])
+        if str(value).strip()
+    }
+    task_option_indexes = step.get("task_option_indexes", {})
+    if (instance_config_text
+            and (disabled_task_entries or enabled_task_entries
+                 or task_option_indexes)):
+        instance_config = Path(expand(instance_config_text))
+        try:
+            payload = json.loads(instance_config.read_text(encoding="utf-8"))
+            changed_names = []
+            for item in payload.get("TaskItems", []):
+                entry = str(item.get("entry", ""))
+                if (entry in disabled_task_entries
+                        and item.get("default_check") is not False):
+                    item["default_check"] = False
+                    changed_names.append(str(item.get("name", item.get("entry", ""))))
+                if (entry in enabled_task_entries
+                        and item.get("default_check") is not True):
+                    item["default_check"] = True
+                    changed_names.append(str(item.get("name", item.get("entry", ""))))
+                option_overrides = task_option_indexes.get(entry, {})
+                if not isinstance(option_overrides, dict):
+                    continue
+                for option in item.get("option", []):
+                    option_name = str(option.get("name", ""))
+                    if option_name not in option_overrides:
+                        continue
+                    expected_index = int(option_overrides[option_name])
+                    if option.get("index") != expected_index:
+                        option["index"] = expected_index
+                        changed_names.append(f"{item.get('name', entry)} / {option_name}")
+            if changed_names:
+                temporary = instance_config.with_suffix(
+                    instance_config.suffix + ".gameflow.tmp")
+                temporary.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+                os.replace(temporary, instance_config)
+                ctx.log(f"{display_name}已应用任务保护配置：{', '.join(changed_names)}")
+        except (OSError, ValueError, TypeError) as exc:
+            return Result(False, f"无法应用 {display_name} 任务保护配置：{exc}")
     existing = {}
+    existing_tail_signatures: dict[str, bytes] = {}
     for name in glob.glob(log_glob):
         try:
-            existing[name] = Path(name).stat().st_size
+            path = Path(name)
+            size = path.stat().st_size
+            existing[name] = size
+            if size:
+                with path.open("rb") as handle:
+                    handle.seek(max(0, size - 256))
+                    existing_tail_signatures[name] = handle.read(
+                        min(256, size))
         except OSError:
             continue
     launch_args = [str(value) for value in step.get("launch_args", [])]
@@ -5562,6 +6028,8 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
     completion_markers = [str(x) for x in step.get("completion_markers", [])]
     error_markers = [str(x) for x in step.get("error_markers", [])]
     update_markers = [str(x) for x in step.get("update_markers", [])]
+    update_notice_only = bool(step.get("update_notice_only", False))
+    reported_updates: set[str] = set()
     maintenance_markers = [str(x) for x in step.get("maintenance_markers", [])]
     dismiss_update_notice = bool(step.get("dismiss_update_notice", False))
     update_ack_button_names = [
@@ -5593,7 +6061,14 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
     game_title = str(step.get("game_title_contains", ""))
     title_hints = [str(x) for x in step.get("title_hints", [])]
     button_names = [str(x) for x in step.get("button_names", [])]
+    start_click_ready_markers = [
+        str(x) for x in step.get("start_click_ready_markers", [])
+    ]
+    start_click_ready = not start_click_ready_markers
+    start_click_ready_settle_seconds = max(
+        0.0, float(step.get("start_click_ready_settle_seconds", 0)))
     started_at = time.monotonic()
+    start_click_ready_at = started_at if start_click_ready else None
     next_click_at = started_at + max(0.0, float(step.get("initial_click_delay", retry_interval)))
     run_started = False
     completion_at = None
@@ -5608,6 +6083,22 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
         started_at + startup_ack_after
         if startup_ack_button_names and max_startup_ack_clicks > 0 else None
     )
+    # Automatic QQ Reader ordered-image CAPTCHA solving state.
+    auto_solve_captcha = bool(step.get("auto_solve_captcha", False))
+    captcha_marker = str(step.get(
+        "captcha_marker", '"name":"AdCaptchaDetected"'))
+    captcha_cooldown = max(
+        3.0, float(step.get("captcha_solver_cooldown", 8)))
+    last_captcha_solve_at = None
+    captcha_solve_attempts = 0
+    captcha_max_attempts = max(1, int(step.get("captcha_max_attempts", 8)))
+    # Automatic QQ Reader ad-div locator fallback state.
+    auto_locate_ad = bool(step.get("auto_locate_ad", False))
+    ad_locator_cooldown = max(
+        3.0, float(step.get("ad_locator_cooldown", 8)))
+    last_ad_locator_at = None
+    ad_locator_attempts = 0
+    ad_locator_max_attempts = max(1, int(step.get("ad_locator_max_attempts", 8)))
     screenshot_saved = False
     screenshot_evidence_seen = False
     game_foregrounded = False
@@ -5716,13 +6207,23 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                     return failure("自动更新等待期间任务被用户停止")
             step["_startup_update_wait_consumed"] = True
             existing = {}
+            existing_tail_signatures = {}
             for name in glob.glob(log_glob):
                 try:
-                    existing[name] = Path(name).stat().st_size
+                    path = Path(name)
+                    size = path.stat().st_size
+                    existing[name] = size
+                    if size:
+                        with path.open("rb") as handle:
+                            handle.seek(max(0, size - 256))
+                            existing_tail_signatures[name] = handle.read(
+                                min(256, size))
                 except OSError:
                     continue
             started_at = time.monotonic()
             last_log_activity_at = started_at
+            start_click_ready = not start_click_ready_markers
+            start_click_ready_at = started_at if start_click_ready else None
             next_click_at = started_at + max(
                 0.0, float(step.get("initial_click_delay", retry_interval)))
             next_startup_ack_at = (
@@ -5774,7 +6275,18 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                     size = path.stat().st_size
                 except OSError:
                     continue
-                if size < position:
+                log_rewritten = size < position
+                if not log_rewritten and position > 0:
+                    previous_signature = existing_tail_signatures.get(name)
+                    if previous_signature is not None:
+                        try:
+                            with path.open("rb") as handle:
+                                handle.seek(max(0, position - len(previous_signature)))
+                                current_signature = handle.read(len(previous_signature))
+                            log_rewritten = current_signature != previous_signature
+                        except OSError:
+                            continue
+                if log_rewritten:
                     position = 0
                 if size <= position:
                     continue
@@ -5796,7 +6308,7 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                 start_seen_in_delta = any(marker and marker in content
                                           for marker in start_markers)
                 needs_full_rescan = (
-                    position > 0 and marker_candidates
+                    log_rewritten and marker_candidates
                     and ((start_markers and not start_seen_in_delta)
                          or (not start_markers and not any(
                              marker and marker in content
@@ -5813,9 +6325,97 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                                 for marker in marker_candidates))):
                         content = whole
                 existing[name] = size
+                if size:
+                    try:
+                        with path.open("rb") as handle:
+                            handle.seek(max(0, size - 256))
+                            existing_tail_signatures[name] = handle.read(
+                                min(256, size))
+                    except OSError:
+                        existing_tail_signatures.pop(name, None)
                 last_log_activity_at = time.monotonic()
+                # Auto-solve the QQ Reader ordered-image CAPTCHA when the MAA
+                # pipeline reports AdCaptchaDetected.  A cooldown prevents
+                # hammering the solver while the challenge frame settles, and
+                # an attempt cap stops an unsolvable captcha from stalling us
+                # forever (the run then ends via the normal timeout/stall path).
+                if (auto_solve_captcha and captcha_marker
+                        and any("Node.Recognition.Succeeded" in line
+                                and captcha_marker in line
+                                for line in content.splitlines())):
+                    now = time.monotonic()
+                    if (last_captcha_solve_at is None
+                            or now - last_captcha_solve_at >= captcha_cooldown):
+                        last_captcha_solve_at = now
+                        captcha_solve_attempts += 1
+                        ctx.log(f"{display_name}检测到验证码（第 "
+                                f"{captcha_solve_attempts} 次尝试），开始自动点选")
+                        solved, solve_message = _run_captcha_solver(step, ctx)
+                        ctx.log(f"{display_name}验证码自动处理：{solve_message}")
+                        # Bound total solver invocations.  A stale-frame result
+                        # (`captcha_layout:false`) is not a confirmed solve, so a
+                        # challenge that never stabilises fails the run here
+                        # instead of stalling for the whole workflow timeout.
+                        if captcha_solve_attempts >= captcha_max_attempts:
+                            capture_reward(force=True)
+                            return failure(
+                                f"{display_name}验证码自动求解达到 "
+                                f"{captcha_max_attempts} 次仍未确认成功，等待人工或超时",
+                                captcha_attempts=captcha_solve_attempts,
+                                captcha_last_message=solve_message)
+                # Ad-entry fallback: when Maa fails to find "立即观看" or
+                # scrolls past the ad card, use the ad-div locator to click it.
+                ad_not_found = (
+                    ("Node.Recognition.Failed" in content
+                     and ('"name":"AdClickWatch"' in content
+                          or '"name":"AdVideoCounterVisible"' in content))
+                    or ('"name":"AdScrollToVideoCard"' in content
+                        and "max_hit reached" in content)
+                )
+                if auto_locate_ad and ad_not_found:
+                    now = time.monotonic()
+                    if (last_ad_locator_at is None
+                            or now - last_ad_locator_at >= ad_locator_cooldown):
+                        last_ad_locator_at = now
+                        ad_locator_attempts += 1
+                        ctx.log(f"{display_name}未读到广告入口（第 "
+                                f"{ad_locator_attempts} 次尝试），开始定位广告卡片")
+                        located, locate_message = _run_ad_locator(step, ctx)
+                        ctx.log(f"{display_name}广告卡片定位：{locate_message}")
+                        if not located and ad_locator_attempts >= ad_locator_max_attempts:
+                            capture_reward(force=True)
+                            return failure(
+                                f"{display_name}广告入口定位达到 "
+                                f"{ad_locator_max_attempts} 次仍未确认，等待人工或超时",
+                                ad_locator_attempts=ad_locator_attempts,
+                                ad_locator_last_message=locate_message)
+                if (not start_click_ready and any(
+                        marker and marker in content
+                        for marker in start_click_ready_markers)):
+                    start_click_ready = True
+                    start_click_ready_at = time.monotonic()
+                    next_click_at = max(
+                        next_click_at,
+                        start_click_ready_at + start_click_ready_settle_seconds)
+                    ctx.log(
+                        f"{display_name}已确认脚本连接目标就绪，"
+                        f"等待 {start_click_ready_settle_seconds:g} 秒后允许点击启动")
+                # A few assistants rewrite the whole daily log on startup.
+                # That rewritten chunk can contain yesterday/previous-run
+                # completion markers before the current RUN START marker.
+                # Only terminal markers occurring after the newest start
+                # marker in this chunk belong to the active invocation.
+                newest_start_offset = max(
+                    (content.rfind(marker) for marker in start_markers
+                     if marker and marker in content),
+                    default=-1,
+                )
+                terminal_content = (
+                    content[newest_start_offset:]
+                    if newest_start_offset >= 0 else content
+                )
                 failed_task_marker = str(step.get("failed_task_marker", ""))
-                if failed_task_marker and failed_task_marker in content:
+                if failed_task_marker and failed_task_marker in terminal_content:
                     failed_task_seen = True
                     failed_task_logs.add(name)
                 if any(marker in content for marker in start_markers):
@@ -5860,12 +6460,16 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                         update_failure_marker_seen = matched_update_failure
                 marker = _matching_marker(content, update_markers)
                 if marker:
-                    capture_reward(force=True)
-                    return _update_skip_result(
-                        display_name, step, marker,
-                        {"log": name, "start_clicks": click_count,
-                         "screenshot": (screenshot_path
-                                        if screenshot_saved else None)})
+                    if update_notice_only:
+                        _report_update_notice(
+                            ctx, display_name, marker, reported_updates)
+                    else:
+                        capture_reward(force=True)
+                        return _update_skip_result(
+                            display_name, step, marker,
+                            {"log": name, "start_clicks": click_count,
+                             "screenshot": (screenshot_path
+                                            if screenshot_saved else None)})
                 maintenance_marker = _matching_marker(content, maintenance_markers)
                 if maintenance_marker:
                     capture_reward(force=True)
@@ -5875,10 +6479,19 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                          "screenshot": (screenshot_path
                                         if screenshot_saved else None)})
                 for marker in error_markers:
-                    if run_started and marker in content:
+                    if run_started and marker in terminal_content:
                         if (update_failure_state_seen
                                 and update_failure_marker_seen is not None):
                             capture_reward(force=True)
+                            if update_notice_only:
+                                _report_update_notice(
+                                    ctx, display_name,
+                                    update_failure_marker_seen, reported_updates)
+                                return failure(
+                                    f"{display_name}检测到更新相关执行失败，重启本流程继续处理",
+                                    log=name, state=update_failure_state_key,
+                                    marker=update_failure_marker_seen,
+                                    retry_step=True)
                             return _update_skip_result(
                                 display_name, step, update_failure_marker_seen,
                                 {"log": name, "state": update_failure_state_key,
@@ -5889,7 +6502,7 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                         return failure(f"{display_name}异常结束：{marker}",
                                        log=name, marker=marker)
                 for marker in completion_markers:
-                    if run_started and marker in content:
+                    if run_started and marker in terminal_content:
                         completion_at = time.monotonic()
                         completion_log = name
                         ctx.log(f"{display_name}检测到完成日志，观察 {quiet_seconds:g} 秒")
@@ -5969,6 +6582,14 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                     and time.monotonic() >= next_update_ack_at):
                 if update_ack_clicks >= max_update_ack_clicks:
                     capture_reward(force=True)
+                    if update_notice_only:
+                        _report_update_notice(
+                            ctx, display_name, update_notice_marker,
+                            reported_updates)
+                        return failure(
+                            f"{display_name}更新公告处理达到点击上限，重启本流程",
+                            update_ack_clicks=update_ack_clicks,
+                            start_clicks=click_count, retry_step=True)
                     return _update_skip_result(
                         display_name, step, update_notice_marker,
                         {"update_ack_clicks": update_ack_clicks,
@@ -5988,7 +6609,8 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                 else:
                     next_click_at = now + min(update_ack_retry_interval, 3)
                 continue
-            if (not run_started and next_startup_ack_at is not None
+            if (not run_started and start_click_ready
+                    and next_startup_ack_at is not None
                     and time.monotonic() >= next_startup_ack_at
                     and startup_ack_clicks < max_startup_ack_clicks):
                 startup_ack_clicks += 1
@@ -6039,7 +6661,8 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                     f"{display_name}进入任务后日志已 "
                     f"{now - last_log_activity_at:g} 秒无更新，判定脚本停滞",
                     log_stalled=True,
-                    log_stall_seconds=now - last_log_activity_at)
+                    log_stall_seconds=now - last_log_activity_at,
+                    retry_step=True)
             if run_started and completion_at is None:
                 related_running = (
                     _process_image_exists([*process_images, *worker_images])
@@ -6060,7 +6683,8 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                         "但未产生完成日志",
                         process_exit_after_start=True,
                         process_exit_grace=post_start_process_exit_grace)
-            if not run_started and time.monotonic() >= next_click_at:
+            if (not run_started and start_click_ready
+                    and time.monotonic() >= next_click_at):
                 if click_count >= max_start_clicks:
                     return failure(
                         f"{display_name}已达到 {max_start_clicks} 次启动点击上限，"
@@ -6076,6 +6700,12 @@ def run_log_gui_daily(step: dict[str, Any], ctx: RunContext) -> Result:
                 next_click_at = time.monotonic() + retry_interval
                 if not clicked:
                     continue
+        if run_started and last_state_key:
+            return failure(
+                f"等待 {display_name}完成超时（{timeout:g} 秒），"
+                f"最后状态为“{last_state_key}”",
+                stalled_state=last_state_key,
+                retry_step=True)
         return failure(f"等待 {display_name}完成超时（{timeout:g} 秒）")
     finally:
         if step.get("close_on_complete", True):
@@ -6145,7 +6775,117 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     exe = Path(expand(str(step.get("executable") or ctx.tool("maaend_gui"))))
     if not exe.exists():
         return Result(False, f"找不到 MaaEnd：{exe}")
+    game_process = str(step.get("game_process_image", ""))
+    game_title = str(step.get("game_title_contains", ""))
+    game_executable_text = str(step.get("game_executable", "")).strip()
+    game_executable = (
+        Path(expand(game_executable_text)) if game_executable_text else None)
+    if (game_executable is not None
+            and not _process_image_exists([game_process or game_executable.name])):
+        if not game_executable.exists():
+            return Result(False, f"找不到终末地游戏本体：{game_executable}")
+        try:
+            subprocess.Popen(
+                [str(game_executable)], cwd=str(game_executable.parent),
+                creationflags=(subprocess.CREATE_NO_WINDOW
+                               if os.name == "nt" else 0))
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 740:
+                try:
+                    import ctypes
+                    launched = int(ctypes.windll.shell32.ShellExecuteW(
+                        None, "runas", str(game_executable), None,
+                        str(game_executable.parent), 1))
+                except Exception as elevated_exc:
+                    return Result(
+                        False,
+                        f"终末地需要管理员权限，提权启动失败：{elevated_exc}")
+                if launched <= 32:
+                    return Result(
+                        False,
+                        f"终末地需要管理员权限，提权启动返回错误码 {launched}")
+                ctx.log("终末地游戏本体需要管理员权限，已请求提权启动")
+            else:
+                return Result(False, f"无法预先启动终末地游戏本体：{exc}")
+        game_start_timeout = max(
+            1.0, float(step.get("game_start_timeout", 300)))
+        deadline = time.monotonic() + game_start_timeout
+        ctx.log(
+            f"已预先启动终末地游戏本体，等待窗口就绪（最多 {game_start_timeout:g} 秒）")
+        while time.monotonic() < deadline:
+            if ctx.stop_event.wait(2):
+                return Result(False, "等待终末地游戏窗口期间任务被用户停止")
+            if (_process_image_exists([game_process or game_executable.name])
+                    and (not game_title
+                         or _matching_visible_window_exists([game_title]))):
+                settle = max(
+                    0.0, float(step.get("game_start_settle_seconds", 5)))
+                if settle and ctx.stop_event.wait(settle):
+                    return Result(False, "终末地游戏窗口稳定等待期间任务被用户停止")
+                ctx.log("终末地游戏本体窗口已就绪，再启动 MaaEnd")
+                break
+        else:
+            return Result(
+                False,
+                f"终末地游戏本体在 {game_start_timeout:g} 秒内未产生可见窗口",
+                {"retry_step": True, "game_start_timeout": game_start_timeout})
+    if (game_executable is not None
+            and _process_image_exists([game_process or game_executable.name])
+            and game_title
+            and not _matching_visible_window_exists([game_title])):
+        game_start_timeout = max(
+            1.0, float(step.get("game_start_timeout", 300)))
+        deadline = time.monotonic() + game_start_timeout
+        ctx.log(
+            f"终末地游戏进程已存在，等待窗口就绪（最多 {game_start_timeout:g} 秒）")
+        while time.monotonic() < deadline:
+            if ctx.stop_event.wait(2):
+                return Result(False, "等待终末地游戏窗口期间任务被用户停止")
+            if _matching_visible_window_exists([game_title]):
+                settle = max(
+                    0.0, float(step.get("game_start_settle_seconds", 5)))
+                if settle and ctx.stop_event.wait(settle):
+                    return Result(False, "终末地游戏窗口稳定等待期间任务被用户停止")
+                ctx.log("终末地游戏本体窗口已就绪，再启动 MaaEnd")
+                break
+        else:
+            return Result(
+                False,
+                f"终末地游戏进程存在但 {game_start_timeout:g} 秒内没有可见窗口",
+                {"retry_step": True, "game_start_timeout": game_start_timeout})
     log_glob = expand(str(step.get("log_glob") or exe.parent / "debug" / "20??-??-??-*.log"))
+    # MaaEnd stores its task list in <exe_dir>/config/mxu-MaaEnd.json.  If the
+    # "全套日常" instance was left with an empty task list — or with only the
+    # MXU_KILLPROC self-kill placeholder that a previous teardown wrote — MaaEnd
+    # will submit it, immediately kill itself (exit 0), and GameFlow would
+    # otherwise burn two retries on "MaaEnd 提前退出".  Fail fast instead.
+    maaend_config = exe.parent / "config" / "mxu-MaaEnd.json"
+    try:
+        config_payload = json.loads(maaend_config.read_text(encoding="utf-8"))
+        for instance in config_payload.get("instances", []):
+            if instance.get("name") != "全套日常":
+                continue
+            tasks = instance.get("tasks", [])
+            real_tasks = [
+                t for t in tasks
+                if str(t.get("taskName", "")).startswith("__MXU_KILLPROC__") is False
+            ]
+            if not tasks:
+                return Result(
+                    False,
+                    "终末地 MaaEnd 配置异常：“全套日常”实例任务列表为空",
+                    {"retry_step": False})
+            if not real_tasks:
+                return Result(
+                    False,
+                    "终末地 MaaEnd 配置异常：“全套日常”仅剩 MXU_KILLPROC "
+                    "清理任务（上次收尾未恢复完整任务列表）",
+                    {"retry_step": False})
+    except FileNotFoundError:
+        return Result(False, f"找不到 MaaEnd 配置文件：{maaend_config}",
+                      {"retry_step": False})
+    except (OSError, ValueError, TypeError) as exc:
+        ctx.log(f"读取 MaaEnd 配置文件失败（继续尝试启动）：{exc}")
     process_image = str(step.get("process_image", exe.name))
     if os.name == "nt" and step.get("clean_existing", True):
         subprocess.run(["taskkill", "/IM", process_image, "/T", "/F"],
@@ -6175,6 +6915,8 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     update_markers = [str(x) for x in step.get("update_markers", [])]
     script_update_markers = [str(x) for x in step.get(
         "script_update_markers", ["发现新版本:", "开始下载更新:"])]
+    update_notice_only = bool(step.get("update_notice_only", False))
+    reported_updates: set[str] = set()
     maintenance_markers = [str(x) for x in step.get("maintenance_markers", [])]
     fallback_after = float(step.get("gui_fallback_after", 45))
     fallback_retry_seconds = max(
@@ -6194,8 +6936,6 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     game_foregrounded = False
     game_foreground_attempted = False
     screenshot_saved = False
-    game_process = str(step.get("game_process_image", ""))
-    game_title = str(step.get("game_title_contains", ""))
     screenshot_path = expand(str(step.get("screenshot_path", "")))
     framework_log_value = expand(str(step.get("framework_log_path", "")))
     framework_log = Path(framework_log_value) if framework_log_value else None
@@ -6206,6 +6946,9 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     submitted_ids: list[int] = []
     last_primary_terminal_at = time.monotonic()
     framework_stall_seconds = float(step.get("framework_stall_seconds", 1800))
+    log_stall_seconds = max(
+        0.0, float(step.get("log_stall_seconds", 300)))
+    last_log_activity_at = time.monotonic()
     failed_settle_seconds = float(step.get("failed_settle_seconds", 45))
     all_primary_terminal_at: float | None = None
     credit_menu_wait_started_at: float | None = None
@@ -6303,6 +7046,7 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
             if framework_log is not None and framework_log.exists():
                 framework_position = framework_log.stat().st_size
             started_at = time.monotonic()
+            last_log_activity_at = started_at
             next_fallback_at = started_at + fallback_after
             ctx.log("MaaEnd 自动更新等待结束，重新开始本轮启动检测")
         while time.monotonic() - started_at <= timeout:
@@ -6326,6 +7070,7 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                 except OSError:
                     continue
                 existing[name] = size
+                last_log_activity_at = time.monotonic()
                 script_update_marker = _matching_marker(content, script_update_markers)
                 if script_update_marker and not script_update_seen:
                     if step.get("skip_on_script_update", False):
@@ -6337,22 +7082,30 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                              "reason_code": "script_update"},
                             reason_code="script_update")
                     if step.get("ignore_script_updates", False):
+                        _report_update_notice(
+                            ctx, "终末地/MaaEnd", script_update_marker,
+                            reported_updates)
+                        # The same appended chunk often also contains the
+                        # authoritative "全套日常" start marker.  Keep parsing
+                        # it after reporting the update instead of discarding
+                        # the entire chunk.
+                    else:
+                        script_update_seen = True
+                        next_script_update_click_at = time.monotonic()
                         ctx.log(
                             f"检测到 MaaEnd 脚本更新（{script_update_marker}）；"
-                            "已按配置忽略脚本更新提示，继续等待每日任务")
-                        continue
-                    script_update_seen = True
-                    next_script_update_click_at = time.monotonic()
-                    ctx.log(
-                        f"检测到 MaaEnd 脚本更新（{script_update_marker}）；"
-                        "等待下载、安装和重启，不暂停终末地每日流程")
+                            "等待下载、安装和重启，不暂停终末地每日流程")
                 update_marker = _matching_marker(content, update_markers)
                 if update_marker:
-                    capture_endfield(force=True)
-                    return _update_skip_result(
-                        "终末地", step, update_marker,
-                        {"log": name,
-                         "screenshot": screenshot_path if screenshot_saved else None})
+                    if update_notice_only:
+                        _report_update_notice(
+                            ctx, "终末地", update_marker, reported_updates)
+                    else:
+                        capture_endfield(force=True)
+                        return _update_skip_result(
+                            "终末地", step, update_marker,
+                            {"log": name,
+                             "screenshot": screenshot_path if screenshot_saved else None})
                 maintenance_marker = _matching_marker(content, maintenance_markers)
                 if maintenance_marker:
                     capture_endfield(force=True)
@@ -6414,6 +7167,7 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                             handle.seek(framework_position)
                             framework_chunk = handle.read().decode("utf-8", errors="replace")
                         framework_position = framework_size
+                        last_log_activity_at = time.monotonic()
                         record_framework_events(framework_chunk)
                 except OSError:
                     pass
@@ -6425,11 +7179,23 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                         tail_bytes = max(1024, int(step.get("framework_rotated_tail_bytes", 2_000_000)))
                         with rotated_path.open("rb") as handle:
                             handle.seek(max(0, rotated_path.stat().st_size - tail_bytes))
+                            last_log_activity_at = time.monotonic()
                             record_framework_events(handle.read().decode("utf-8", errors="replace"))
                     except OSError:
                         continue
 
             now = time.monotonic()
+            if (run_started and log_stall_seconds > 0
+                    and now - last_log_activity_at >= log_stall_seconds):
+                capture_endfield(force=True)
+                return Result(
+                    False,
+                    f"MaaEnd 进入任务后日志已 {now - last_log_activity_at:g} 秒无更新，"
+                    "重启本流程",
+                    {"log_stalled": True,
+                     "log_stall_seconds": now - last_log_activity_at,
+                     "retry_step": True,
+                     "screenshot": screenshot_path if screenshot_saved else None})
             if script_update_seen and now >= next_script_update_click_at:
                 clicked, message = _click_named_gui_button(
                     proc.pid, [process_image], ["MaaEnd"],
@@ -6482,6 +7248,7 @@ def run_maaend_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                               f" {framework_stall_seconds:g} 秒没有完成结果",
                               {"pending_primary": pending_primary,
                                "framework_log": str(framework_log),
+                               "retry_step": True,
                                "screenshot": screenshot_path if screenshot_saved else None})
             if (completion_seen and expected_total is not None
                     and len(submitted_ids) >= expected_total):
@@ -6707,6 +7474,8 @@ def run_gumballs_gui(step: dict[str, Any], ctx: RunContext) -> Result:
     start_marker = str(step.get("start_marker", "用户操作：启动任务"))
     completion_marker = str(step.get("completion_marker", "任务已全部完成！"))
     update_markers = [str(x) for x in step.get("update_markers", [])]
+    update_notice_only = bool(step.get("update_notice_only", False))
+    reported_updates: set[str] = set()
     maintenance_markers = [str(x) for x in step.get("maintenance_markers", [])]
     max_rounds = max(1, int(step.get("max_rounds", 2)))
     started_at = time.monotonic()
@@ -6803,8 +7572,12 @@ def run_gumballs_gui(step: dict[str, Any], ctx: RunContext) -> Result:
                 existing[name] = size
                 update_marker = _matching_marker(content, update_markers)
                 if update_marker:
-                    return _update_skip_result(
-                        "不思议迷宫", step, update_marker, {"log": name})
+                    if update_notice_only:
+                        _report_update_notice(
+                            ctx, "不思议迷宫", update_marker, reported_updates)
+                    else:
+                        return _update_skip_result(
+                            "不思议迷宫", step, update_marker, {"log": name})
                 maintenance_marker = _matching_marker(content, maintenance_markers)
                 if maintenance_marker:
                     return _maintenance_skip_result(
@@ -7010,6 +7783,17 @@ def run_mumu_wait(step: dict[str, Any], ctx: RunContext) -> Result:
             return None
 
     info = query_info()
+    if info:
+        host = str(info.get("adb_host_ip") or "127.0.0.1").strip()
+        try:
+            port = int(info.get("adb_port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        if host and 0 < port <= 65535:
+            detected_device = f"{host}:{port}"
+            if detected_device != device:
+                ctx.log(f"MuMu 实例 {index} 当前 ADB 地址为 {detected_device}，替换配置中的 {device}")
+                device = detected_device
     if not info or not info.get("is_android_started"):
         launched = ctx.command(
             [str(manager), "control", "--vmindex", index, "launch"],
@@ -7022,6 +7806,18 @@ def run_mumu_wait(step: dict[str, Any], ctx: RunContext) -> Result:
         if ctx.stop_event.is_set():
             return Result(False, "任务被用户停止")
         info = query_info()
+        if info:
+            host = str(info.get("adb_host_ip") or "127.0.0.1").strip()
+            try:
+                port = int(info.get("adb_port") or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if host and 0 < port <= 65535:
+                detected_device = f"{host}:{port}"
+                if detected_device != device:
+                    ctx.log(
+                        f"MuMu 实例 {index} ADB 端口已变化：{device} -> {detected_device}")
+                    device = detected_device
         # MuMu 12 occasionally keeps reporting is_android_started=false even
         # after Android and its dedicated ADB endpoint are fully operational.
         # Treat boot_completed=1 from that endpoint as authoritative instead of
@@ -7147,6 +7943,32 @@ def run_delay(step: dict[str, Any], ctx: RunContext) -> Result:
     return Result(not ctx.stop_event.wait(seconds), "等待完成" if not ctx.stop_event.is_set() else "任务被用户停止")
 
 
+def run_email_screenshot(step: dict[str, Any], ctx: RunContext) -> Result:
+    """Send one workflow's freshly produced screenshot immediately."""
+    from copy import deepcopy
+    from .mailer import send_daily_screenshots
+
+    workflow = str(step.get("workflow", "")).strip()
+    path = Path(expand(str(step.get("path", ""))))
+    if not workflow:
+        return Result(False, "邮件截图步骤缺少 workflow")
+    if not path.is_file():
+        return Result(False, f"待发送截图不存在：{path}")
+    try:
+        started_epoch = path.stat().st_mtime
+    except OSError as exc:
+        return Result(False, f"无法读取待发送截图：{exc}")
+
+    config = deepcopy(ctx.config)
+    settings = config.setdefault("email_report", {})
+    settings["workflow_step_sends"] = []
+    settings["screenshots"] = {workflow: str(path)}
+    ok, message = send_daily_screenshots(
+        ctx.root, config, [workflow],
+        [{"workflow": workflow, "status": "success"}], started_epoch)
+    return Result(ok, message, {"workflow": workflow, "path": str(path)})
+
+
 RUNNERS = {"command": run_command, "maa": run_maa, "maa_gui": run_maa_gui,
            "baas_gui": run_baas_gui, "ba_reward_verify": run_ba_reward_verify,
            "alas_gui": run_alas_gui, "naruto_shadow": run_naruto_shadow,
@@ -7155,4 +7977,5 @@ RUNNERS = {"command": run_command, "maa": run_maa, "maa_gui": run_maa_gui,
            "log_gui_daily": run_log_gui_daily, "qq_reader_trial": run_qq_reader_trial,
            "window_screenshot": run_window_screenshot,
            "ldplayer": run_ldplayer, "mumu_wait": run_mumu_wait,
-           "adb": run_adb, "delay": run_delay}
+           "adb": run_adb, "delay": run_delay,
+           "email_screenshot": run_email_screenshot}

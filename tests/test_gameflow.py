@@ -1,5 +1,4 @@
 import json
-import inspect
 import os
 import sys
 import tempfile
@@ -25,6 +24,7 @@ from gameflow.runners import (RUNNERS, EmulatorBlackScreenWatchdog, Result, RunC
                               _focus_window_before_click,
                               _parse_baas_queue_count,
                               _naruto_lobby_icon_metrics,
+                              _naruto_reward_page_eligible,
                               _naruto_visual_metrics, _screen_is_black,
                               _screen_looks_like_blue_archive_update,
                               _screen_looks_like_blue_archive_title,
@@ -32,7 +32,7 @@ from gameflow.runners import (RUNNERS, EmulatorBlackScreenWatchdog, Result, RunC
                               run_alas_gui,
                               run_adb, run_baas_gui, run_ba_reward_verify, run_gumballs_gui,
                               run_log_gui_daily, run_maa_gui, run_maaend_gui, run_mumu_wait,
-                              run_naruto_shadow, run_qq_reader_trial)
+                              run_qq_reader_trial)
 
 
 class GameFlowTests(unittest.TestCase):
@@ -242,6 +242,17 @@ class GameFlowTests(unittest.TestCase):
         false_update, _ = _screen_looks_like_blue_archive_update(
             cv2.imencode(".png", initialization)[1].tobytes(), {})
         self.assertFalse(false_update)
+
+        login_update = image.copy()
+        login_update[0:158, 0:384] = (255, 190, 25)
+        login_ok, login_metrics = _screen_looks_like_blue_archive_update(
+            cv2.imencode(".png", login_update)[1].tobytes(),
+            {"ba_update_require_title_logo": True})
+        self.assertTrue(login_ok, login_metrics)
+        no_logo, _ = _screen_looks_like_blue_archive_update(
+            cv2.imencode(".png", image)[1].tobytes(),
+            {"ba_update_require_title_logo": True})
+        self.assertFalse(no_logo)
 
         locked_stage_notice = np.full((720, 1280, 3), 70, dtype=np.uint8)
         locked_stage_notice[137:576, 358:922] = (238, 238, 238)
@@ -600,36 +611,46 @@ class GameFlowTests(unittest.TestCase):
         self.assertTrue(blue_start["verify_started"])
         self.assertGreaterEqual(blue_start["verify_timeout"], 60)
         blue_runner = config["workflows"]["blue_archive_daily"]["steps"][2]
+        self.assertTrue(blue_runner["ignore_script_updates"])
+        self.assertNotIn("update_markers", blue_runner)
+        self.assertNotIn("script_update_markers", blue_runner)
+        self.assertTrue(blue_runner["game_update_markers"])
+        self.assertTrue(blue_runner["game_update_screen_detection"])
+        self.assertTrue(blue_runner["login_download_confirm_detection"])
+        self.assertTrue(blue_runner["ba_update_require_title_logo"])
         self.assertEqual(
             [blue_runner["repeated_probe_tap_x"], blue_runner["repeated_probe_tap_y"]],
             [930, 540])
         naruto = config["workflows"]["naruto_daily"]["steps"][2]
-        self.assertTrue(naruto["shadow_open_confirm"])
-        self.assertEqual(naruto["shadow_continue_point"], [520, 1118])
-        self.assertGreaterEqual(naruto["shadow_continue_wait"], 5)
-        self.assertGreaterEqual(naruto["enable_retry_interval"], 8)
-        self.assertGreaterEqual(naruto["enable_confirm_timeout"], 10)
-        self.assertGreaterEqual(naruto["enable_confirm_stable_checks"], 2)
-        self.assertIn("功能运行中", naruto["enable_success_labels"])
-        self.assertGreaterEqual(naruto["start_retry_interval"], 12)
-        self.assertGreaterEqual(naruto["float_stop_confirm_timeout"], 10)
-        self.assertGreaterEqual(naruto["float_stop_stable_checks"], 2)
-        self.assertEqual(naruto["orientation_points"]["landscape"]["game_consent_point"],
-                         [817, 600])
-        self.assertIn("float_start_x", naruto["orientation_points"]["portrait"])
-        self.assertIn("float_start_x", naruto["orientation_points"]["landscape"])
-        self.assertGreaterEqual(naruto["stage1_wrong_foreground_checks"], 5)
         self.assertEqual(
-            naruto["orientation_points"]["portrait"]["popup_confirm_point"],
-            [360, 935])
+            config["workflows"]["naruto_daily"]["steps"][1]["package"],
+            "com.tencent.KiHan")
+        self.assertEqual(naruto["runner"], "log_gui_daily")
+        self.assertEqual(naruto["executable"], r"G:\maahuo\MFAAvalonia.exe")
+        self.assertEqual(naruto["log_glob"], r"G:\maahuo\logs\log-*.log")
+        self.assertEqual(naruto["button_names"], ["开始任务"])
+        self.assertAlmostEqual(naruto["gui_click_x_ratio"], 0.963)
+        self.assertAlmostEqual(naruto["gui_click_y_ratio"], 0.134)
         self.assertEqual(
-            naruto["orientation_points"]["landscape"]["popup_confirm_point"],
-            [640, 515])
-        self.assertEqual(naruto["shadow_update_grace_versions"], 3)
-        self.assertEqual(naruto["shadow_update_confirm_point"], [760, 500])
-        self.assertGreaterEqual(naruto["shadow_update_popup_close_wait"], 10)
-        self.assertGreaterEqual(naruto["lobby_icon_min_matches"], 3)
-        self.assertGreaterEqual(len(naruto["lobby_reference_paths"]), 2)
+            naruto["instance_config"],
+            r"G:\maahuo\config\instances\default.json")
+        self.assertIn("share", naruto["enabled_task_entries"])
+        self.assertIn("advanture", naruto["enabled_task_entries"])
+        self.assertEqual(
+            naruto["task_option_indexes"]["share"]["\u5206\u4eab\u540e\u76f4\u63a5\u8fd4\u56de\u6e38\u620f"], 1)
+        self.assertEqual(
+            naruto["task_option_indexes"]["advanture"]["\u5192\u9669\u526f\u672c\u4e00\u76f4\u63a8\u5173"], 1)
+        self.assertGreaterEqual(naruto["clean_existing_settle_seconds"], 2)
+        self.assertIn("emulator-5554", naruto["start_click_ready_markers"][0])
+        self.assertGreaterEqual(naruto["start_click_ready_settle_seconds"], 3)
+        self.assertNotIn("startup_ack_button_names", naruto)
+        self.assertIn("初始化控制器失败", naruto["error_markers"])
+        self.assertNotIn("任务中断", naruto["error_markers"])
+        naruto_verify = config["workflows"]["naruto_daily"]["steps"][3]
+        self.assertGreaterEqual(naruto_verify["timeout"], 900)
+        self.assertGreaterEqual(naruto_verify["lobby_icon_min_matches"], 3)
+        self.assertTrue(naruto_verify["lobby_reference_paths"])
+        self.assertTrue(naruto_verify["lobby_role_name_check"])
         zenless = config["workflows"]["zenless_daily"]["steps"][0]
         self.assertEqual(zenless["retry"], 1)
         self.assertGreaterEqual(zenless["state_stall_overrides"]["^空洞操作器 \\|"], 900)
@@ -638,7 +659,7 @@ class GameFlowTests(unittest.TestCase):
             for marker in zenless["update_failure_markers"]))
         self.assertEqual(config["failure_retry"]["max_attempts"], 2)
         maa = config["workflows"]["daily_game"]["steps"][2]
-        self.assertEqual(maa["log_stall_seconds"], 600)
+        self.assertEqual(maa["log_stall_seconds"], 300)
         self.assertTrue(maa["gui_start_click"])
         self.assertEqual(maa["max_start_clicks"], 6)
         self.assertEqual(
@@ -657,58 +678,56 @@ class GameFlowTests(unittest.TestCase):
         self.assertAlmostEqual(star_rail["update_ack_x_ratio"], 0.366)
         self.assertAlmostEqual(star_rail["update_ack_y_ratio"], 0.912)
         watched = (("daily_game", 2), ("blue_archive_daily", 2),
-                   ("azur_lane_daily", 1), ("naruto_daily", 2),
+                   ("azur_lane_daily", 1),
                    ("gumballs_daily", 2))
         for workflow, index in watched:
             step = config["workflows"][workflow]["steps"][index]
             self.assertTrue(step["black_screen_watchdog"])
             self.assertEqual(step["black_screen_timeout"], 300)
 
-    def test_naruto_retry_loops_check_optional_continue_before_clicking(self):
-        source = inspect.getsource(run_naruto_shadow)
+        gumballs = config["workflows"]["gumballs_daily"]["steps"][2]
+        self.assertEqual(gumballs["runner"], "gumballs_gui")
+        self.assertEqual(gumballs["business_silence_timeout"], 300)
+        self.assertEqual(gumballs["max_stalled_retries"], 1)
+        self.assertGreaterEqual(gumballs["stalled_restart_delay"], 5)
+        self.assertGreaterEqual(gumballs["stalled_relaunch_wait"], 5)
+        self.assertIn("\u5185\u5b58\u7ba1\u7406", gumballs["heartbeat_markers"])
+        watched_steps = {
+            "daily_game": 2,
+            "blue_archive_daily": 2,
+            "azur_lane_daily": 1,
+            "naruto_daily": 2,
+            "gumballs_daily": 2,
+            "endfield_daily": 0,
+            "zenless_daily": 0,
+            "star_rail_daily": 0,
+            "qq_reader_trial": 1,
+        }
+        for workflow, index in watched_steps.items():
+            step = config["workflows"][workflow]["steps"][index]
+            self.assertTrue(step["update_notice_only"], workflow)
+        self.assertEqual(naruto["post_start_log_stall_seconds"], 300)
+        self.assertEqual(
+            config["workflows"]["endfield_daily"]["steps"][0]
+            ["framework_stall_seconds"], 600)
+        self.assertEqual(
+            config["workflows"]["endfield_daily"]["steps"][0]
+            ["log_stall_seconds"], 300)
+        self.assertFalse(
+            config["workflows"]["endfield_daily"]["steps"][0]
+            ["skip_on_script_update"])
+        for workflow in ("zenless_daily", "star_rail_daily"):
+            step = config["workflows"][workflow]["steps"][0]
+            self.assertEqual(step["startup_timeout"], 300)
+            self.assertEqual(step["post_start_log_stall_seconds"], 300)
 
-        enable_loop = source[source.index("enable_attempt = 0"):
-                             source.index("start_deadline =")]
-        self.assertLess(
-            enable_loop.index("click_shadow_continue_if_visible"),
-            enable_loop.index("enable_attempt += 1"),
-        )
-        self.assertIn("if continued.details.get(\"clicked\"):", enable_loop)
-        self.assertIn("重新开始本轮", enable_loop)
-        self.assertIn("confirm_shadow_enabled(enable_confirm_timeout)", enable_loop)
-        self.assertIn("本次不视为启动成功", enable_loop)
-        self.assertIn("ensure_package_foreground(shadow_package)", enable_loop)
-        self.assertIn("find_ui_text_point_exact(\"启动功能\")", enable_loop)
-
-        float_loop = source[source.index("while time.monotonic() < start_deadline"):
-                            source.index("if not game_started:")]
-        self.assertLess(
-            float_loop.index("click_shadow_continue_if_visible"),
-            float_loop.index("start_attempt += 1"),
-        )
-        self.assertIn("重新识别红色浮窗", float_loop)
-        self.assertIn("inspect_float_primary_control(confirm_point)", float_loop)
-        self.assertIn("未识别到方形终止符", float_loop)
-        self.assertIn("confirm_game_foreground()", float_loop)
-        self.assertIn("按游戏启动成功处理", float_loop)
-        self.assertNotIn("if game_focused:", float_loop)
-        self.assertIn("locate_float_icon_details()", float_loop)
-        self.assertIn("handle_game_blocking_page()", float_loop)
-        self.assertIn("classify_collapsed_float_control(icon_point)", float_loop)
-        self.assertIn("全程未点击该方形符", float_loop)
-        self.assertIn('side_label = "左侧"', float_loop)
-        self.assertIn('else "右侧"', float_loop)
-        self.assertIn("半缩在{side_label}边缘", float_loop)
-        self.assertIn("浮窗点击前检测到其他应用位于前台", float_loop)
-        self.assertIn("取消本次坐标点击", float_loop)
-        self.assertNotIn("未知，按校准坐标尝试", float_loop)
-
-        stage_one = source[source.index("# Stage 1:"):
-                           source.index("# Stage 2:")]
-        self.assertIn("stage1_wrong_foreground_checks", stage_one)
-        self.assertIn("is_login_method_page(image)", stage_one)
-        self.assertIn("handle_game_blocking_page()", stage_one)
-        self.assertIn('"emulator_restart_requested": True', stage_one)
+    def test_naruto_daily_no_longer_uses_legacy_shadow_runner(self):
+        config = load_config(
+            Path(__file__).resolve().parents[1] / "config" / "workflow.json")
+        naruto = config["workflows"]["naruto_daily"]["steps"][2]
+        self.assertEqual(naruto["runner"], "log_gui_daily")
+        self.assertNotEqual(naruto["runner"], "naruto_shadow")
+        self.assertNotIn("shadow_package", naruto)
 
     def test_successful_workflow_and_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1026,7 +1045,8 @@ class GameFlowTests(unittest.TestCase):
             step = {
                 "device": "test", "use_fixed_entry": True,
                 "entry_x_ratio": 0.052, "entry_y_ratio": 0.326,
-                "evidence_path": str(root / "evidence.png"), "page_wait": 0, "threshold": 0.8
+                "evidence_path": str(root / "evidence.png"), "page_wait": 0,
+                "threshold": 0.8, "return_home_before_verify": False,
             }
             ctx = RunContext(root, {"tools": {"adb": "adb"}}, lambda _: None, threading.Event())
             with patch("gameflow.runners.subprocess.run", side_effect=calls):
@@ -1055,6 +1075,7 @@ class GameFlowTests(unittest.TestCase):
             step = {
                 "device": "test", "entry_x_ratio": 0.052, "entry_y_ratio": 0.326,
                 "evidence_path": str(root / "evidence.png"), "page_wait": 0,
+                "return_home_before_verify": False,
             }
             ctx = RunContext(root, {"tools": {"adb": "adb"}}, lambda _: None,
                              threading.Event())
@@ -1215,6 +1236,48 @@ class GameFlowTests(unittest.TestCase):
             self.assertTrue(result.details["defer_update_next_day"])
             self.assertEqual(result.details["next_day_update_wait"], 600)
 
+    def test_baas_ignores_script_update_marker_but_keeps_game_markers(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "baas.exe"
+            exe.write_bytes(b"")
+            log = root / "today_baas1.log"
+            log.write_text("", encoding="utf-8")
+            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+
+            def finish_after_script_notice():
+                time.sleep(0.08)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        "发现 BAAS 新版本\n模拟器连接成功\n"
+                        "开始执行【工作任务】\n任务全部执行成功\n")
+
+            threading.Thread(
+                target=finish_after_script_notice, daemon=True).start()
+            step = {
+                "executable": str(exe),
+                "log_glob": str(log),
+                "ignore_script_updates": True,
+                "update_markers": ["发现 BAAS 新版本"],
+                "game_update_markers": ["游戏客户端版本过低"],
+                "poll_seconds": 0.01,
+                "completion_quiet_seconds": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+                "gui_click_fallback": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()):
+                result = run_baas_gui(step, ctx)
+            self.assertTrue(result.success, result.message)
+
     def test_baas_restarts_offline_emulator_and_resumes(self):
         class FakeProcess:
             pid = 123456789
@@ -1268,7 +1331,8 @@ class GameFlowTests(unittest.TestCase):
             root = Path(tmp); exe = root / "baas.exe"; exe.write_bytes(b"")
             logs = root / "logs"; logs.mkdir(); log = logs / "today_baas1.log"
             log.write_text("", encoding="utf-8")
-            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
             clicks = 0
 
             def click(*args, **kwargs):
@@ -1541,6 +1605,15 @@ class GameFlowTests(unittest.TestCase):
         metrics = _naruto_visual_metrics(reward)
         self.assertTrue(metrics["reward_page"])
         self.assertTrue(metrics["all_chests_claimed"])
+
+    def test_naruto_reward_page_requires_verified_navigation(self):
+        candidate = {"reward_page": True, "all_chests_claimed": True}
+        self.assertFalse(_naruto_reward_page_eligible(
+            candidate, lobby_visible=False, reward_clicks=0))
+        self.assertFalse(_naruto_reward_page_eligible(
+            candidate, lobby_visible=True, reward_clicks=1))
+        self.assertTrue(_naruto_reward_page_eligible(
+            candidate, lobby_visible=False, reward_clicks=1))
 
     def test_naruto_lobby_uses_fixed_entry_icons_not_background_color(self):
         import cv2
@@ -2067,6 +2140,118 @@ class GameFlowTests(unittest.TestCase):
             self.assertEqual(result.details["start_clicks"], 3)
             self.assertEqual(click.call_count, 3)
 
+    def test_log_gui_daily_waits_for_fresh_device_ready_marker(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "MFAAvalonia.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            # Historical markers must never make the new invocation look
+            # started or completed.
+            log.write_text("RUN START\nALL DONE\n", encoding="utf-8")
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
+
+            def publish_readiness():
+                time.sleep(0.08)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("MFA booting\n")
+                time.sleep(0.08)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("DEVICE READY emulator-5554\n")
+
+            def click(*args):
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("RUN START\nALL DONE\n")
+                return True, "clicked"
+
+            threading.Thread(target=publish_readiness, daemon=True).start()
+            step = {
+                "display_name": "MaaAutoNaruto 火影日常",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["MFAAvalonia.exe"],
+                "button_names": ["开始任务"],
+                "start_click_ready_markers": ["DEVICE READY emulator-5554"],
+                "start_click_ready_settle_seconds": 0.01,
+                "initial_click_delay": 0,
+                "log_retry_interval": 0.01,
+                "start_markers": ["RUN START"],
+                "completion_markers": ["ALL DONE"],
+                "completion_quiet_seconds": 0.01,
+                "max_start_clicks": 2,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()), patch(
+                    "gameflow.runners._click_named_gui_button",
+                    side_effect=click) as start_click:
+                result = run_log_gui_daily(step, ctx)
+            self.assertTrue(result.success, result.message)
+            start_click.assert_called_once()
+            self.assertTrue(any("连接目标就绪" in message for message in messages))
+
+    def test_log_gui_daily_ignores_completion_before_latest_start_in_rewritten_log(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "MFAAvalonia.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("OLD START\nALL DONE\n", encoding="utf-8")
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
+
+            def rewrite_then_finish():
+                time.sleep(0.2)
+                log.write_text(
+                    "OLD START\nALL DONE\nDEVICE READY\nRUN START\n",
+                    encoding="utf-8")
+                time.sleep(0.12)
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write("ALL DONE\n")
+
+            threading.Thread(target=rewrite_then_finish, daemon=True).start()
+            step = {
+                "display_name": "MaaAutoNaruto 火影日常",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["MFAAvalonia.exe"],
+                "button_names": ["开始任务"],
+                "start_click_ready_markers": ["DEVICE READY"],
+                "start_click_ready_settle_seconds": 0,
+                "initial_click_delay": 10,
+                "log_retry_interval": 0.01,
+                "start_markers": ["RUN START"],
+                "completion_markers": ["ALL DONE"],
+                "completion_quiet_seconds": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()), patch(
+                    "gameflow.runners._process_image_exists",
+                    return_value=True):
+                result = run_log_gui_daily(step, ctx)
+            self.assertTrue(result.success, f"{result.message}; messages={messages!r}")
+            self.assertTrue(any("日志已更新" in message for message in messages))
+            self.assertEqual(
+                sum("检测到完成日志" in message for message in messages), 1)
+
     def test_log_gui_daily_reports_update_without_retryable_failure(self):
         class FakeProcess:
             pid = 123456789
@@ -2104,6 +2289,53 @@ class GameFlowTests(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(result.status, "needs_update")
             self.assertIn("需要更新", result.message)
+
+    def test_log_gui_daily_notice_only_continues_to_completion(self):
+        class FakeProcess:
+            pid = 123456789
+            returncode = None
+            def poll(self): return None
+            def terminate(self): self.returncode = 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Launcher.exe"
+            exe.write_bytes(b"")
+            log = root / "daily.log"
+            log.write_text("", encoding="utf-8")
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
+
+            def write_run():
+                time.sleep(0.05)
+                log.write_text(
+                    "GitHub 发现新版本: v2026.8.23\n"
+                    "开始运行\n每日任务完成\n",
+                    encoding="utf-8")
+
+            threading.Thread(target=write_run, daemon=True).start()
+            step = {
+                "display_name": "测试每日脚本",
+                "executable": str(exe),
+                "log_glob": str(log),
+                "process_images": ["Launcher.exe"],
+                "start_markers": ["开始运行"],
+                "completion_markers": ["每日任务完成"],
+                "update_markers": ["GitHub 发现新版本"],
+                "update_notice_only": True,
+                "initial_click_delay": 10,
+                "log_retry_interval": 0.01,
+                "completion_quiet_seconds": 0.01,
+                "timeout": 2,
+                "clean_existing": False,
+                "close_on_complete": False,
+            }
+            with patch("gameflow.runners.subprocess.Popen",
+                       return_value=FakeProcess()):
+                result = run_log_gui_daily(step, ctx)
+            self.assertTrue(result.success, result.message)
+            self.assertTrue(any(
+                "仅记录提示，继续执行" in message for message in messages))
 
     def test_log_gui_daily_reports_game_update_when_confirm_is_followed_by_exit(self):
         class FakeProcess:
@@ -2400,14 +2632,15 @@ class GameFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); exe = root / "Launcher.exe"; exe.write_bytes(b"")
             log = root / "daily.log"; log.write_text("", encoding="utf-8")
-            ctx = RunContext(root, {}, lambda _: None, threading.Event())
+            messages = []
+            ctx = RunContext(root, {}, messages.append, threading.Event())
             step = {"display_name": "测试每日", "executable": str(exe),
                     "log_glob": str(log), "process_images": ["Launcher.exe"],
                     "start_markers": ["RUN START"], "log_retry_interval": 0.01,
                     "state_watchdog_regex": r"指令\[\s*([^\]]+)\s*\]\s*节点\s*(.*?)\s*->.*?返回状态\s*(.*)$",
-                    "state_stall_seconds": 0.08, "state_recovery_seconds": 0.05,
+                    "state_stall_seconds": 0.001, "state_recovery_seconds": 0,
                     "targeted_state_recovery_regex": r"^出战 \| 检测游戏窗口 \| 按钮-出战$",
-                    "targeted_state_recovery_after": 0.02,
+                    "targeted_state_recovery_after": 0,
                     "targeted_state_recovery_interval": 0.02,
                     "targeted_state_recovery_max": 1,
                     "targeted_state_recovery_clicks": [[0.48, 0.14, 0],
@@ -2424,7 +2657,8 @@ class GameFlowTests(unittest.TestCase):
                           return_value=Result(True, "saved")) as screenshot:
                 result = run_log_gui_daily(step, ctx)
             self.assertFalse(result.success)
-            self.assertIn("按钮-出战", result.message)
+            self.assertIn("按钮-出战", result.message,
+                          f"result={result!r}; messages={messages!r}")
             self.assertEqual(targeted_click.call_args_list, [
                 call("Game.exe", "", 0.48, 0.14),
                 call("Game.exe", "", 0.906, 0.957),
