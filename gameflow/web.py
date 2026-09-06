@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .engine import WorkflowManager
+from .settings import (HOST_TOOL_LABELS, HostSettingsError, PortError,
+                       validate_port)
 
 
 class UiPreferences:
@@ -101,12 +103,22 @@ button,select{font:inherit}button{position:relative;border:0;color:#fff;border-r
 @media(max-width:900px){.hero{grid-template-columns:1fr 210px}.speech{display:none}.layout{grid-template-columns:1fr}.log-card{grid-column:auto}}@media(max-width:650px){.shell{width:min(100% - 18px,1260px);margin-top:12px}.clock,.quick-nav{display:none}.brand-mark{width:40px;height:40px}.brand small{display:none}.topbar{align-items:flex-start}.top-actions{gap:6px}.quick-start{min-width:0;padding:10px 12px;font-size:12px}.hero{display:block;padding:22px}.hero h2{font-size:24px}.hero-telemetry{grid-template-columns:1fr}.companion-wrap{display:none}.task{grid-template-columns:18px 25px 42px 1fr}.task-actions,.single{grid-column:4}.task-actions{justify-content:flex-start}.card{padding:15px}.toolbar{align-items:stretch}.parallel-control{width:100%}.danger{flex:1}.log-head{align-items:flex-start;flex-direction:column}.log-tools{width:100%;justify-content:space-between}.log-view{height:280px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style></head><body><div class="shell">
-<header class="topbar"><div class="brand"><div class="brand-mark">✦</div><div><h1>GameFlow</h1><small>DIMENSIONAL OPERATIONS</small></div></div><div class="top-actions"><div id="clock" class="clock">SYNC --:--:--</div><button id="startDaily" class="primary quick-start" onclick="runDaily()">✦ 开始每日作战</button><button id="qqTrial" class="test-action" onclick="runQQTrial()">阅 QQ阅读测试</button><button class="danger" onclick="stopAll()">■ 全部停止</button><label class="top-parallel">并发 <select id="parallel"><option value="1">1 队</option><option value="2">2 队</option></select></label><nav class="quick-nav"><a href="#dailyTasks">任务</a><a href="#runtimeLog">日志</a></nav><button class="icon-btn" onclick="toggleTheme()" title="切换昼夜主题">☾</button></div></header>
+<header class="topbar"><div class="brand"><div class="brand-mark">✦</div><div><h1>GameFlow</h1><small>DIMENSIONAL OPERATIONS</small></div></div><div class="top-actions"><div id="clock" class="clock">SYNC --:--:--</div><button id="startDaily" class="primary quick-start" onclick="runDaily()">✦ 开始每日作战</button><button id="qqTrial" class="test-action" onclick="runQQTrial()">阅 QQ阅读测试</button><button class="danger" onclick="stopAll()">■ 全部停止</button><label class="top-parallel">并发 <select id="parallel"><option value="1">1 队</option><option value="2">2 队</option></select></label><nav class="quick-nav"><a href="#dailyTasks">任务</a><a href="#runtimeLog">日志</a><a href="#hostConfig">配置</a></nav><button class="icon-btn" onclick="toggleTheme()" title="切换昼夜主题">☾</button></div></header>
 <section class="hero"><div><div class="eyebrow">COMMAND CENTER / ONLINE</div><h2>每日自动化总控</h2><p>首屏即可启动、停止和查看排队状态；任务开关与顺序在下方编队区调整。 <span class="trial-note">QQ 阅读为独立测试，不计入每日流程。</span></p><div class="hero-status"><span id="statusLight" class="status-light"></span><span id="headline">正在连接指挥系统……</span></div><div id="message" class="hero-message">正在读取任务状态</div><div class="progress-shell"><div class="progress-meta"><span>今日正式任务进度</span><span id="progressText">0 / 0</span></div><div class="progress-track"><div id="progressFill" class="progress-fill"></div></div></div><div class="hero-telemetry"><div class="hero-metric"><b>正在行动</b><span id="active">无</span></div><div class="hero-metric"><b>待命队列</b><span id="queued">无</span></div><div class="hero-metric"><b>最近完成</b><span id="completed">无</span></div></div></div>
 <div class="companion-wrap"><div id="operatorSpeech" class="speech">正在连接祈愿池……</div><button class="gacha-card" onclick="drawCharacter()" title="点击重新召唤女性角色"><span id="operatorPoolSize" class="gacha-pool">POOL 50</span><span id="operatorSeries" class="gacha-hint">RANDOM PICK</span><img id="operatorAvatar" class="gacha-avatar" alt="随机女性游戏或番剧角色头像"><span class="gacha-info"><span id="gachaStars" class="gacha-stars">★★★★★</span><span id="operatorName" class="gacha-name">召唤中</span></span></button></div></section>
 <main class="layout"><div class="stack"><section id="dailyTasks" class="card"><div class="card-title"><div><span class="section-code">SQUAD FORMATION</span><h3>每日任务编队</h3></div><span class="muted small">按住任务卡片直接拖拽 · ↑↓ 也可微调</span></div><div id="tasks"></div><div class="toolbar"><span class="muted small">启动、停止与并发设置已固定在页面顶部。</span><a class="secondary" href="#" style="padding:8px 12px;border-radius:10px;text-decoration:none;color:var(--text)">返回顶部</a></div></section></div>
 <aside class="stack"><section class="card"><div class="card-title"><div><span class="section-code">ARCHIVE</span><h3>最近行动记录</h3></div></div><div id="history" class="history"></div></section></aside>
-<section id="runtimeLog" class="card log-card"><div class="card-title log-head"><div><span class="section-code">NEURAL LINK / STREAM</span><h3>实时运行日志</h3></div><div class="log-tools"><label class="switch"><input id="autoScroll" type="checkbox" checked>跟随最新信号</label><button class="secondary" onclick="clearLogView()">清空终端</button></div></div><div id="logView" class="log-view"><span class="log-empty">等待任务日志……</span></div></section></main></div><div id="toast" class="toast"></div>
+<section id="runtimeLog" class="card log-card"><div class="card-title log-head"><div><span class="section-code">NEURAL LINK / STREAM</span><h3>实时运行日志</h3></div><div class="log-tools"><label class="switch"><input id="autoScroll" type="checkbox" checked>跟随最新信号</label><button class="secondary" onclick="clearLogView()">清空终端</button></div></div><div id="logView" class="log-view"><span class="log-empty">等待任务日志……</span></div></section></main>
+<section id="hostConfig" class="card" style="grid-column:1/-1;margin-top:18px">
+<div class="card-title"><div><span class="section-code">HOST CONFIG / 主机配置</span><h3>工具路径 · 模拟器 · 游戏 · 端口</h3></div><span class="muted small">路径可填可执行文件或所在目录；端口为模拟器 ADB 端口</span></div>
+<div id="hostTools" class="batch-grid" style="grid-template-columns:repeat(auto-fill,minmax(300px,1fr))"></div>
+<div class="toolbar" style="align-items:flex-end">
+<div class="parallel-control" style="margin-right:auto"><label class="switch">模拟器端口 <input id="hostPort" type="number" min="1" max="65535" style="width:90px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text)"></label></div>
+<button class="secondary" onclick="loadHostConfig()">↻ 刷新</button>
+<button class="primary" onclick="saveHostConfig()">💾 保存主机配置</button>
+</div>
+<div id="hostMessage" class="small muted" style="margin-top:9px"></div>
+</section></div><div id="toast" class="toast"></div>
 <script>
 const gameMeta={daily_game:{icon:'♜',color:'#7e8cff'},blue_archive_daily:{icon:'✦',color:'#55cfff'},azur_lane_daily:{icon:'⚓',color:'#4f91ff'},naruto_daily:{icon:'忍',color:'#ff765f'},gumballs_daily:{icon:'◈',color:'#bd77ff'},endfield_daily:{icon:'⬡',color:'#65e2b6'},zenless_daily:{icon:'Z',color:'#f3d85c'},star_rail_daily:{icon:'轨',color:'#8e7dff'},qq_reader_trial:{icon:'阅',color:'#42c9d8'}};
 const baseCharacterPool=[
@@ -224,9 +236,29 @@ async function stopAll(){try{let d=await api('/api/stop',{method:'POST'});notify
 async function refreshLogs(){try{let d=await api('/api/logs?lines=300');latestLines=d.lines||[];let start=0;if(clearAnchor){let i=latestLines.lastIndexOf(clearAnchor);start=i>=0?i+1:0}let visible=latestLines.slice(start),text=visible.length?visible.join('\n'):'暂无新日志';let view=$('logView'),nearBottom=view.scrollHeight-view.scrollTop-view.clientHeight<45;if(text!==lastLogText){view.textContent=text;if($('autoScroll').checked&&nearBottom)view.scrollTop=view.scrollHeight;lastLogText=text}}catch(e){$('logView').textContent='日志读取失败：'+e.message}}
 function clearLogView(){clearAnchor=latestLines.length?latestLines[latestLines.length-1]:'';lastLogText='';$('logView').textContent='终端显示已清空，等待新信号……'}
 function toggleTheme(){document.body.classList.toggle('day');localStorage.setItem('gameflow-day',document.body.classList.contains('day')?'1':'0')}
+let hostToolsCache=[];
+async function loadHostConfig(){
+ try{
+  let d=await api('/api/host');hostToolsCache=d.tools||[];
+  $('hostTools').innerHTML=hostToolsCache.map(t=>{
+   let status=t.configured?'progress-bar success':'progress-bar needs_update';
+   return `<div class="batch-item" style="padding-left:14px"><div class="card-title" style="margin-bottom:6px"><div><b>${t.label}</b><span class="small muted"> · ${t.filename||'可执行文件'}</span></div><span class="run-state ${t.configured?'success':'needs_update'}">${t.configured?'已配置':'未配置'}</span></div><input data-key="${t.key}" type="text" class="small" value="${(t.path||'').replace(/"/g,'&quot;')}" placeholder="留空则不改动 · 填可执行文件或目录" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);color:var(--text)"></div>`
+  }).join('');
+  if(d.port)$('hostPort').value=d.port;
+  $('hostMessage').textContent='已加载 '+hostToolsCache.length+' 项主机配置';
+ }catch(e){$('hostMessage').textContent='读取主机配置失败：'+e.message}
+}
+async function saveHostConfig(){
+ try{
+  let body={};hostToolsCache.forEach(t=>{let v=$('hostTools').querySelector(`[data-key="${t.key}"]`).value.trim();if(v)body[t.key]=v});
+  let port=parseInt($('hostPort').value,10);if(!isNaN(port)&&port>=1&&port<=65535)body.port=port;
+  let d=await api('/api/host',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  notify('✔ 主机配置已保存');loadHostConfig()
+ }catch(e){notify(e.message,true)}
+}
 function updateClock(){let now=new Date();$('clock').textContent='SYNC '+now.toLocaleTimeString('zh-CN',{hour12:false})}
 function saveBeforeExit(){if(!uiPreferences)return;let body=JSON.stringify(preferencePayload());navigator.sendBeacon('/api/preferences',new Blob([body],{type:'application/json'}))}
-if(localStorage.getItem('gameflow-day')==='1')document.body.classList.add('day');$('parallel').addEventListener('change',()=>queuePreferenceSave());window.addEventListener('pagehide',saveBeforeExit);drawCharacter();updateClock();refresh();refreshLogs();setInterval(updateClock,1000);setInterval(refresh,1500);setInterval(refreshLogs,1000);
+if(localStorage.getItem('gameflow-day')==='1')document.body.classList.add('day');$('parallel').addEventListener('change',()=>queuePreferenceSave());window.addEventListener('pagehide',saveBeforeExit);drawCharacter();updateClock();refresh();refreshLogs();loadHostConfig();setInterval(updateClock,1000);setInterval(refresh,1500);setInterval(refreshLogs,1000);
 </script></body></html>'''
 
 
@@ -235,7 +267,7 @@ def handler_for(manager: WorkflowManager):
         name for name, workflow in manager.config["workflows"].items()
         if name != "self_test" and not workflow.get("test_only", False)
     ]
-    preferences = UiPreferences(manager.root / "data" / "ui_preferences.json",
+    preferences = UiPreferences(manager.state_root / "data" / "ui_preferences.json",
                                 daily_workflows)
 
     class Handler(BaseHTTPRequestHandler):
@@ -261,6 +293,28 @@ def handler_for(manager: WorkflowManager):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if parsed.path == "/api/host":
+                host = manager.host_settings
+                paths = host.resolve()
+                settings = manager.runtime_settings
+                port = settings.port if settings else None
+                tools = []
+                for key, label in HOST_TOOL_LABELS.items():
+                    value = str(paths.get(key, "")).strip()
+                    tools.append({
+                        "key": key,
+                        "label": label,
+                        "path": value,
+                        "configured": bool(value) and Path(value).is_file(),
+                        "filename": str(getattr(host, "_FILENAMES", {}).get(key, "")),
+                    })
+                self._json({
+                    "labels": dict(HOST_TOOL_LABELS),
+                    "tools": tools,
+                    "port": port,
+                    "workflows": list(manager.config.get("workflows", {}).keys()),
+                })
+                return
             if parsed.path == "/api/status":
                 workflows = [{"id": key, "name": value.get("display_name", key),
                               "test_only": bool(value.get("test_only", False))}
@@ -268,6 +322,11 @@ def handler_for(manager: WorkflowManager):
                 self._json({"state": manager.state(), "workflows": workflows,
                             "runs": manager.store.recent(),
                             "preferences": preferences.get()})
+                return
+            if parsed.path == "/api/identity":
+                self._json(getattr(manager, "build_identity", {
+                    "build_id": "unknown", "root": str(manager.root.resolve())
+                }))
                 return
             if parsed.path == "/api/preferences":
                 self._json({"preferences": preferences.get()})
@@ -278,7 +337,7 @@ def handler_for(manager: WorkflowManager):
                     count = max(20, min(int(query.get("lines", ["300"])[0]), 1000))
                 except ValueError:
                     count = 300
-                log_path = manager.root / "logs" / "gameflow.log"
+                log_path = manager.state_root / "logs" / "gameflow.log"
                 lines = []
                 if log_path.exists():
                     with log_path.open("rb") as handle:
@@ -299,6 +358,26 @@ def handler_for(manager: WorkflowManager):
                     self._json({"ok": True, "preferences": value})
                 except (ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
                     self._json({"ok": False, "message": f"保存界面状态失败：{exc}"}, 400)
+                return
+            if parsed.path == "/api/host":
+                try:
+                    body = self._body()
+                    host = manager.host_settings
+                    paths = {}
+                    for key in HOST_TOOL_LABELS:
+                        raw = body.get(key)
+                        if raw is not None and str(raw).strip():
+                            paths = host.set_path(key, str(raw).strip())
+                    if "port" in body and body["port"] is not None:
+                        port = validate_port(body["port"])
+                        settings = manager.runtime_settings
+                        if settings is not None:
+                            settings.save_port(port)
+                    self._json({"ok": True, "paths": paths,
+                                "port": manager.runtime_settings.port
+                                if manager.runtime_settings else None})
+                except (HostSettingsError, PortError, ValueError, TypeError) as exc:
+                    self._json({"ok": False, "message": f"保存主机配置失败：{exc}"}, 400)
                 return
             if parsed.path == "/api/run":
                 query = urllib.parse.parse_qs(parsed.query)

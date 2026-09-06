@@ -20,8 +20,35 @@ config/workflow.local.json
 .vscode/
 .idea/
 
-# Temporary archives and screenshots
-*.zip
-*.png
-*.jpg
-*.jpeg
+# Generated runtime evidence (project assets remain trackable)
+/logs/**/*.zip
+/logs/**/*.png
+/logs/**/*.jpg
+/logs/**/*.jpeg
+/data/cache/
+
+# Local build output
+build/
+dist/
+*.spec
+
+# ★ 第三方自动化运行时副本（剥离出仓库，从各工具上游自行下载，见 docs/tools_upstream_index.md）★
+resources/tools/
+
+# ★ 构建产物 / 备份目录（剥离，不进仓库）★
+dist_rebuild/
+dist_patch_20260901/
+build_patch_20260901/
+build_rebuild/
+backups/
+
+# ★ 本地临时 / 运行产物（不进仓库）★
+.hermes/
+*.log
+*.log.*
+*cache*/
+*.err
+*.tmp
+test_localsystem.txt
+build_info.json
+maafw.bak.*

@@ -1,93 +1,132 @@
-param(
-    [string]$Mode = "web",
-    [switch]$Force
-)
+param([string]$Mode = 'web', [switch]$Force)
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-if (-not $isAdmin) {
-    $arguments = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', ('"' + $MyInvocation.MyCommand.Path + '"'),
-        $Mode
-    )
-    if ($Force) {
-        $arguments += '-Force'
+$url = 'http://127.0.0.1:8765/'
+$statusUrl = $url + 'api/status'
+$identityUrl = $url + 'api/identity'
+$localExe = Join-Path $root 'GameFlow.exe'
+$builtExe = Join-Path $root 'dist\GameFlow\GameFlow.exe'
+$resolvedExe = if (Test-Path -LiteralPath $localExe) { $localExe } elseif (
+    Test-Path -LiteralPath $builtExe) { $builtExe } else { $null }
+$expectedRoot = if ($resolvedExe) { Split-Path -Parent $resolvedExe } else { $root }
+if ($Mode -eq 'web') {
+    $busy = $false
+    try {
+        $identity = Invoke-RestMethod -Uri $identityUrl -TimeoutSec 2
+        $actualRoot = [IO.Path]::GetFullPath([string]$identity.root).TrimEnd('\')
+        $wantedRoot = [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')
+        $isElevated = [bool]$identity.elevated
+        if ($actualRoot -ieq $wantedRoot -and $isElevated) {
+            Start-Process $url
+            exit
+        }
+        # A legacy/non-elevated build may still answer /api/identity without
+        # the elevated field.  It must not be treated as a reusable server:
+        # stop it when it owns this GameFlow root, then continue to the
+        # elevation branch below.
+        if ([int]$identity.pid -gt 0 -and $actualRoot -ieq $wantedRoot) {
+            Stop-Process -Id ([int]$identity.pid) -Force -ErrorAction Stop
+            Start-Sleep -Milliseconds 500
+        }
+    } catch {
+        # Legacy builds predate /api/identity. Only replace an owner that is
+        # positively identified as GameFlow; never kill an unrelated service.
+        try {
+            Invoke-RestMethod -Uri $statusUrl -TimeoutSec 2 | Out-Null
+            $connection = Get-NetTCPConnection -LocalPort 8765 -State Listen `
+                -ErrorAction Stop | Select-Object -First 1
+            $owner = Get-Process -Id $connection.OwningProcess -ErrorAction Stop
+            $legacyStatus = Invoke-RestMethod -Uri $statusUrl -TimeoutSec 2
+            if ($owner.ProcessName -ieq 'GameFlow' -and [bool]$legacyStatus.state.running) {
+                $busy = $true
+            } elseif ($owner.ProcessName -ieq 'GameFlow') {
+                Stop-Process -Id $owner.Id -Force -ErrorAction Stop
+                Start-Sleep -Milliseconds 500
+            }
+        } catch {}
     }
-    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments
+    if ($busy) {
+        Start-Process $url
+        exit
+    }
+}
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if ($Mode -eq 'web' -and $resolvedExe) {
+        $exeArg = $resolvedExe.Replace("'", "''")
+        $workArg = (Split-Path -Parent $resolvedExe).Replace("'", "''")
+        $elevatedCommand = "Start-Process -FilePath '$exeArg' " +
+            "-ArgumentList 'web --no-browser' -WorkingDirectory '$workArg' " +
+            "-WindowStyle Hidden"
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden `
+            -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden',
+                '-ExecutionPolicy', 'Bypass', '-Command', $elevatedCommand)
+        $ready = $false
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            try {
+                $probeIdentity = Invoke-RestMethod -Uri $identityUrl -TimeoutSec 2
+                if ([bool]$probeIdentity.elevated) {
+                    $ready = $true
+                    break
+                }
+            } catch {
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if ($ready) { Start-Process $url }
+        exit
+    }
+    $arguments = @('-NoProfile', '-WindowStyle', 'Hidden',
+        '-ExecutionPolicy', 'Bypass', '-File',
+        ('"' + $MyInvocation.MyCommand.Path + '"'), $Mode)
+    if ($Force) { $arguments += '-Force' }
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs `
+        -WindowStyle Hidden -ArgumentList $arguments
     exit
 }
 
-Set-Location -LiteralPath $root
-$smtpUser = [Environment]::GetEnvironmentVariable('GAMEFLOW_SMTP_USER', 'User')
-$smtpAuthCode = [Environment]::GetEnvironmentVariable('GAMEFLOW_SMTP_AUTH_CODE', 'User')
-if ($smtpUser) { $env:GAMEFLOW_SMTP_USER = $smtpUser }
-if ($smtpAuthCode) { $env:GAMEFLOW_SMTP_AUTH_CODE = $smtpAuthCode }
+if ($Mode -eq 'stop-server') {
+    Get-Process -Name 'GameFlow' -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    exit
+}
 
-# GameFlow's desktop automation requires the Python environment that contains
-# psutil, pywin32 and pyautogui.  PATH can put the older Python 3.8 installation
-# first; that environment can serve the web page but silently disables every
-# window click, foreground and screenshot operation.  Probe candidates instead
-# of trusting PATH order, and use the same verified runtime for web and CLI runs.
-$pythonCandidates = @(
-    'D:\python\python.exe',
-    (Get-Command python.exe -ErrorAction SilentlyContinue).Source,
-    'C:\Users\26142\AppData\Local\Programs\Python\Python38\python.exe'
-) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
-$python = $null
-foreach ($candidate in $pythonCandidates) {
-    & $candidate -c 'import psutil, win32con, win32gui, pyautogui' 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        $python = $candidate
-        break
+if ($resolvedExe) {
+    $program = $resolvedExe
+    $arguments = if ($Mode -eq 'web') { @('web') } else {
+        @('run', $Mode) + $(if ($Force) { @('--force') } else { @() })
     }
+    $workingDirectory = Split-Path -Parent $resolvedExe
+} else {
+    $program = (Get-Command py.exe -ErrorAction SilentlyContinue).Source
+    if (-not $program) {
+        throw 'GameFlow build was not found. Run build.ps1 first.'
+    }
+    $arguments = @('-3', 'main.py') + $(if ($Mode -eq 'web') { @('web') } else {
+        @('run', $Mode) + $(if ($Force) { @('--force') } else { @() })
+    })
+    $workingDirectory = $root
 }
-if (-not $python) {
-    throw 'No Python runtime with psutil, pywin32 and pyautogui was found.'
-}
-$pythonw = Join-Path (Split-Path -Parent $python) 'pythonw.exe'
-if (-not (Test-Path -LiteralPath $pythonw)) { $pythonw = $python }
 
 if ($Mode -eq 'web') {
-    $existingState = $null
-    try {
-        $existingState = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/status' -TimeoutSec 2
-    } catch {}
-    $staleState = $false
-    if ($existingState -and $existingState.state.running) {
-        $activeNames = @($existingState.state.active)
-        $runningNames = @($existingState.runs | Where-Object { $_.status -eq 'running' } |
-            ForEach-Object { $_.workflow })
-        $staleState = ($activeNames.Count -gt 0 -and
-            @($activeNames | Where-Object { $runningNames -contains $_ }).Count -eq 0)
-    }
-    if ($existingState -and $existingState.state.running -and -not $staleState) {
-        Start-Process 'http://127.0.0.1:8765/'
-        exit
-    }
-    if ($existingState) {
-        # SO_REUSEADDR may briefly leave more than one old listener behind. Remove
-        # every owner that becomes visible before launching the replacement.
-        for ($attempt = 0; $attempt -lt 5; $attempt++) {
-            $owners = @(Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty OwningProcess -Unique)
-            if (-not $owners) { break }
-            $owners | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-            Start-Sleep -Milliseconds 400
+    Start-Process -FilePath $program -ArgumentList ($arguments + '--no-browser') `
+        -WorkingDirectory $workingDirectory -WindowStyle Hidden | Out-Null
+    $ready = $false
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            Invoke-RestMethod -Uri $statusUrl -TimeoutSec 2 | Out-Null
+            $ready = $true
+            break
+        } catch {
+            Start-Sleep -Milliseconds 250
         }
     }
-    Start-Process -FilePath $pythonw -WorkingDirectory $root -ArgumentList @(
-        'main.py', '--config', (Join-Path $root 'config\workflow.json'), 'web'
-    ) -WindowStyle Hidden
-} else {
-    if ($Force) {
-        & $python main.py run $Mode --force
-    } else {
-        & $python main.py run $Mode
+    if (-not $ready) {
+        throw 'GameFlow startup timed out. Check logs\gameflow.log.'
     }
+    Start-Process $url
+} else {
+    & $program @arguments
     Read-Host 'Press Enter to close'
 }

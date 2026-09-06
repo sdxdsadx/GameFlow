@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "includes": [
+    {"source": "runtime", "required": ["adb.exe"]}
+  ],
+  "exclude_directories": [
+    ".git", ".github", ".pytest_cache", "__pycache__", "tests", "test",
+    "screenshots", "logs", "debug", "update", "updates", "cache", ".cache"
+  ],
+  "exclude_suffixes": [".pyc", ".pyo", ".tmp", ".bak"],
+  "writable_directories": []
+}

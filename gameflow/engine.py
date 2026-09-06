@@ -11,7 +11,7 @@ from .daily import operational_day
 from .diagnostics import collect_failure_diagnostics
 from .runners import (RUNNERS, Result, RunContext,
                       _restart_configured_emulator)
-from .mailer import send_daily_screenshots
+from .settings import workflow_host_path_errors
 from .store import Store
 
 
@@ -20,6 +20,7 @@ class Engine:
 
     def __init__(self, root: Path, config: dict[str, Any], store: Store):
         self.root, self.config, self.store = root, config, store
+        self.state_root = Path(config.get("_state_root", root))
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -46,6 +47,10 @@ class Engine:
         if self.state()["running"]:
             return False, f"工作流正在运行：{workflow}"
         wf = self.config["workflows"][workflow]
+        host_errors = workflow_host_path_errors(self.config, workflow)
+        if host_errors:
+            return False, ("主机路径预检失败：" + "；".join(host_errors)
+                           + "。请运行 configure-host 或编辑 data/host_settings.json")
         if wf.get("once_per_day") and not force and self.store.completed_today(workflow):
             return False, "今日已经成功执行；如需重跑请使用强制执行"
         self._stop.clear()
@@ -72,13 +77,13 @@ class Engine:
             return Result(False, f"未知执行器：{step['runner']}")
         retry_policy = self.config.get("failure_retry", {})
         retry_policy_enabled = bool(retry_policy.get("enabled", False))
-        if retry_policy_enabled and not step.get("run_always"):
-            max_attempts = max(1, int(retry_policy.get("max_attempts", 2)))
-            retries_left = max_attempts - 1
-        else:
-            max_attempts = None
-            retries_left = max(0, int(step.get("retry", 0)))
-        black_retries_left = max(0, int(step.get("max_black_screen_restarts", 1)))
+        # With the global failure policy enabled, retries belong to the whole
+        # workflow.  Retrying only this step would leave its script/emulator
+        # alive and skip the run_always cleanup before the next attempt.
+        retries_left = (0 if retry_policy_enabled else
+                        max(0, int(step.get("retry", 0))))
+        black_retries_left = (0 if retry_policy_enabled else
+                              max(0, int(step.get("max_black_screen_restarts", 1))))
         last = Result(False, "未执行")
         attempt = 0
         while True:
@@ -97,7 +102,7 @@ class Engine:
             if not last.success and not self._stop.is_set() and diagnostics_enabled:
                 try:
                     evidence = collect_failure_diagnostics(
-                        self.root, self.config, workflow_id,
+                        self.state_root, self.config, workflow_id,
                         self.config["workflows"][workflow_id], step, attempt,
                         last.message, last.details,
                     )
@@ -109,7 +114,7 @@ class Engine:
                     self.log(f"[{step['id']}] 保存错误现场失败：{exc}")
             emulator_restart = bool(last.details.get("black_screen_restart")
                                     or last.details.get("emulator_restart_requested"))
-            if emulator_restart:
+            if emulator_restart and not retry_policy_enabled:
                 self.log(f"[{step['id']}] {last.message}")
                 recovered = _restart_configured_emulator(step, ctx)
                 last.details["emulator_restart_success"] = recovered.success
@@ -134,8 +139,6 @@ class Engine:
             elif retries_left > 0:
                 retries_left -= 1
                 should_retry = True
-            if max_attempts is not None and attempt >= max_attempts:
-                should_retry = False
             if should_retry:
                 default_retry_delay = retry_policy.get("retry_delay", 3)
                 delay = float(last.details.get(
@@ -146,31 +149,20 @@ class Engine:
                 continue
             return last
 
-    def _execute(self, workflow: str, trigger: str) -> None:
+    def _execute_attempt(self, workflow: str, trigger: str) -> tuple[str, str, bool]:
         run_id = self.store.start_run(workflow, trigger)
-        ctx = RunContext(self.root, self.config, self.log, self._stop)
+        ctx = RunContext(self.root, self.config, self.log, self._stop, workflow)
         status, message, failed = "success", "正常结束", False
+        retryable = True
         cleanup_errors: list[str] = []
         try:
-            update_flag = self.store.get_workflow_flag(workflow, "update_before_next_day")
-            current_day = operational_day()
-            update_wait_pending = bool(
-                isinstance(update_flag, dict)
-                and update_flag.get("marked_day") != current_day)
             for configured_step in self.config["workflows"][workflow]["steps"]:
                 step = dict(configured_step)
+                if isinstance(configured_step.get("env"), dict):
+                    step["env"] = dict(configured_step["env"])
+                ctx.bind_device(step)
                 if failed and not step.get("run_always"):
                     continue
-                supports_update_wait = bool(
-                    step.get("supports_startup_update_wait")
-                    or step.get("runner") in {
-                        "maa_gui", "baas_gui", "alas_gui", "naruto_shadow",
-                        "gumballs_gui", "maaend_gui", "log_gui_daily",
-                    })
-                update_wait_injected = bool(update_wait_pending and supports_update_wait)
-                if update_wait_injected:
-                    step["startup_update_wait"] = float(
-                        update_flag.get("wait_seconds", 600))
                 self._update(step=step["id"])
                 # A user's stop request must not prevent run_always screenshots
                 # and process cleanup from running.  Give those short, bounded
@@ -179,35 +171,36 @@ class Engine:
                 step_ctx = ctx
                 if step.get("run_always") and self._stop.is_set():
                     step_ctx = RunContext(
-                        self.root, self.config, self.log, threading.Event())
+                        self.root, self.config, self.log, threading.Event(), workflow)
+                    step_ctx.runtime.update(ctx.runtime)
                 result = self._execute_step(run_id, workflow, step, step_ctx)
-                if (update_wait_injected
-                        and step.get("_startup_update_wait_consumed")):
-                    self.store.delete_workflow_flag(
-                        workflow, "update_before_next_day")
-                    update_wait_pending = False
                 if not result.success:
-                    if result.details.get("defer_update_next_day"):
-                        self.store.set_workflow_flag(
-                            workflow, "update_before_next_day",
-                            {"marked_day": current_day,
-                             "wait_seconds": float(result.details.get(
-                                 "next_day_update_wait", 600)),
-                             "reason": result.message})
                     special_status = result.status in {
                         "skipped", "needs_update", "cancelled",
                     }
-                    if failed and step.get("run_always"):
+                    if step.get("run_always"):
                         cleanup_errors.append(
                             f"{step['id']}：{result.message}")
-                        self.log(
-                            f"清理步骤 {step['id']} 未成功，保留原始失败原因："
-                            f"{result.message}")
+                        if failed:
+                            self.log(
+                                f"清理步骤 {step['id']} 未成功，保留原始失败原因："
+                                f"{result.message}")
+                        else:
+                            failed = True
+                            retryable = False
+                            status = "cleanup_failed"
+                            message = (
+                                f"任务完成但清理失败：{step['id']}："
+                                f"{result.message}")
+                            self.log(message)
                         continue
                     if step.get("continue_on_error") and not special_status:
                         self.log(f"步骤 {step['id']} 未成功但已按配置忽略：{result.message}")
                         continue
                     failed = True
+                    if (special_status
+                            or result.details.get("retryable") is False):
+                        retryable = False
                     status = ("cancelled" if self._stop.is_set() else
                               (result.status or "failed"))
                     ending = {
@@ -225,6 +218,38 @@ class Engine:
             if cleanup_errors:
                 message += "；清理警告：" + "；".join(cleanup_errors)
             self.store.finish_run(run_id, status, message)
+        return status, message, retryable
+
+    def _execute(self, workflow: str, trigger: str) -> None:
+        retry_policy = self.config.get("failure_retry", {})
+        retry_enabled = bool(retry_policy.get("enabled", False))
+        # Daily batches already own their explicit second round so their first
+        # and second attempt remain visible in the batch result. Standalone
+        # runs get the same full-workflow retry behavior here.
+        batch_attempt = trigger.startswith("daily_batch")
+        max_attempts = (1 if batch_attempt or not retry_enabled else
+                        max(1, int(retry_policy.get("max_attempts", 2))))
+        status, message = "failed", "未执行"
+        try:
+            for attempt in range(1, max_attempts + 1):
+                attempt_trigger = trigger if attempt == 1 else f"{trigger}_retry"
+                if attempt > 1:
+                    self.log(f"[{workflow}] 清理已完成，从流程开头开始第 {attempt} 次运行")
+                status, message, retryable = self._execute_attempt(
+                    workflow, attempt_trigger)
+                if (status != "failed" or not retryable
+                        or self._stop.is_set() or attempt >= max_attempts):
+                    break
+                delay = max(0.0, float(retry_policy.get("retry_delay", 3)))
+                self.log(
+                    f"[{workflow}] 第 {attempt} 次运行失败，脚本与模拟器清理已执行；"
+                    f"{delay:g} 秒后从头重新启动流程")
+                if self._stop.wait(delay):
+                    status, message = "cancelled", "任务已由用户取消"
+                    break
+        finally:
+            if self._stop.is_set():
+                status, message = "cancelled", "任务已由用户取消"
             self._update(running=False, workflow=workflow, step=None, message=message,
                          last_status=status, last_finished=self.store.now())
 
@@ -234,6 +259,7 @@ class WorkflowManager:
 
     def __init__(self, root: Path, config: dict[str, Any], store: Store):
         self.root, self.config, self.store = root, config, store
+        self.state_root = Path(config.get("_state_root", root))
         interrupted = self.store.recover_interrupted_runs()
         if interrupted:
             logging.getLogger("gameflow").warning("已恢复 %d 条因旧进程退出而中断的运行记录", interrupted)
@@ -293,8 +319,6 @@ class WorkflowManager:
                 today_message=today_message,
                 today_started_at=daily.get("started_at"),
                 today_finished_at=daily.get("finished_at"),
-                tomorrow_update=bool(self.store.get_workflow_flag(
-                    name, "update_before_next_day")),
             )
         return {
             "running": bool(active) or batch["running"], "workflow": ", ".join(active) or None,
@@ -361,7 +385,6 @@ class WorkflowManager:
         return True, f"每日流程已开始，最多并行 {max_parallel} 个任务"
 
     def _run_batch(self, selected: list[str], max_parallel: int, force: bool) -> None:
-        batch_started_epoch = time.time()
         display_names = [self.config["workflows"][name].get("display_name", name)
                          for name in selected]
         omitted = [wf.get("display_name", name)
@@ -519,11 +542,6 @@ class WorkflowManager:
         else:
             still_failed = sum(status in retryable_statuses for status in statuses)
             message = f"每日流程完成；第二轮后仍有 {still_failed} 个失败任务"
-        if not self._batch_stop.is_set():
-            mail_ok, mail_message = send_daily_screenshots(
-                self.root, self.config, selected, completed, batch_started_epoch)
-            logging.getLogger("gameflow").info(mail_message)
-            message += "；" + mail_message
         with self._lock:
             self._batch_cancelled.clear()
             self._batch.update(running=False, queue=[], active=[], completed=completed, message=message)

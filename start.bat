@@ -1,2 +1,3 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch_admin.ps1" web
+start "" /b wscript.exe //B "%~dp0start_hidden.vbs"
+exit /b

@@ -1,159 +1,54 @@
-# GameFlow 游戏每日自动化
+# GameFlow
 
-GameFlow 是运行在本机的工作流控制器，负责启动雷电模拟器、等待 ADB、调用 MAA 或其他脚本、失败重试、记录历史并在最后清理模拟器。
+GameFlow 是一个本机、离线控制面的游戏自动化编排器。正式产物将第三方自动化运行时放在 `resources/tools`，代码和配置只使用相对项目根路径，不会在运行时下载脚本或检查版本。
 
-当前系统架构、八个游戏的真实执行路径、并行/互斥规则、异常证据链和后续维护规划，见 [流程图与规划图](docs/workflow-diagrams.md)。
+## 运行
 
-## 首次配置
+1. 双击 `start.bat`。
+2. 使用恢复后的旧版作战面板选择任务、调整顺序和并行数，然后开始每日流程；GameFlow 会按实例编号启动对应模拟器。
 
-编辑 `config/workflow.json`：
+页面仅监听 `127.0.0.1`。旧版面板保持原有布局和功能，不增加端口控件；`data/runtime_settings.json` 按工作流保存实际发现的模拟器端点。端点只传给所属工作流和对应内置工具，不会覆盖其他雷电或 MuMu 实例。QQ 阅读始终使用产物内的 `resources/runtime/adb.exe`。
 
-1. 将 `tools.ldconsole` 改为雷电 9 的 `ldconsole.exe` 路径。
-2. 将 `tools.adb` 改为雷电目录内的 `adb.exe` 路径。
-3. 当前电脑已配置为使用 `E:\\MAA\\MAA-v5.3.1-win-x64\\MAA.exe` 桌面版，并通过其日志完成标记判断任务结束。
-4. 确认主模拟器的 ADB 地址。雷电 9 主实例通常为 `127.0.0.1:5555`，多开实例通常依次为 `5557`、`5559`、`5561`。
-5. MAA 已绑定雷电实例 `aknight`（实例编号 1、地址 `emulator-5556`），启动 MAA 后会直接运行其中已勾选的日常任务。
+旧版面板保留任务开关、SKIPPED 标签、拖拽与上下排序、并行数、单任务运行、强制重跑、逐任务取消、全部停止、实时日志、运行历史和今日完成状态。
 
-默认关闭每日定时执行。完成一次手动验证后，把 `daily_game.trigger.enabled` 改为 `true`。
+## 构建
 
-## 使用
+项目不自动安装依赖。构建机需预先安装 `requirements.txt` 中的包，然后运行：
 
-- 双击 `start.bat`：打开本地控制面板。
-- 双击 `run_daily.bat`：直接执行每日任务。
-- 碧蓝档案每日：`python main.py run blue_archive_daily`。
-- 碧蓝航线每日：双击 `run_azur_lane_daily.bat`，或在控制面板勾选“碧蓝航线每日流程”。
-- 碧蓝航线强制重跑：双击 `run_azur_lane_daily_force.bat`，可绕过“今日已成功执行”的防重复限制。
-- 火影忍者每日：双击 `run_naruto_daily.bat`，强制重跑使用 `run_naruto_daily_force.bat`。
-- 不思议迷宫每日：双击 `run_gumballs_daily.bat`，强制重跑使用 `run_gumballs_daily_force.bat`。
-- 终末地每日：双击 `run_endfield_daily.bat`，强制重跑使用 `run_endfield_daily_force.bat`。
-- 程序自检：`python main.py run self_test`
-- 查看历史：`python main.py status`
-
-控制面板仅监听 `127.0.0.1`，不会向局域网或互联网开放。
-
-启动控制面板时会出现 Windows 管理员权限确认。BAAS 外层启动器自身以管理员权限运行，因此 GameFlow 也必须以相同权限启动，才能识别和点击 BAAS Pro 主窗口。
-
-控制面板会以后台进程运行，不再保留容易被误关的命令窗口。浏览器页面关闭不会终止正在执行的任务；重新打开 `http://127.0.0.1:8765/` 即可继续查看。若电脑关机或 GameFlow 进程被强制结束，下一次启动会把遗留的 `running` 记录标记为 `interrupted`，避免显示错误状态。
-
-## 每日流程编排
-
-控制面板支持管理配置中的八个游戏每日流程：
-
-1. 通过“每日启动/SKIPPED”选择本次需要参加的任务。
-2. 拖拽任务卡片或使用上下箭头调整启动顺序。
-3. “最多同时执行”选择 `1` 时按顺序串行，选择 `2` 时两个游戏并行。
-4. 点击“开始每日流程”。调度器会按照列表顺序启动任务，任意时刻不会超过所设并发数；终末地、绝区零和星穹铁道属于同一互斥组，三者不会同时执行。
-
-排序、参与开关和并发选择保存在本机 `data/ui_preferences.json`。也可以使用每个任务右侧的“单队出击”按钮，或只取消某一个排队中/运行中的任务。点击“停止全部”会通知所有正在运行的任务停止，并继续执行各自标记为 `run_always` 的截图和模拟器清理步骤。
-
-## 可靠性与状态规则
-
-- 八个游戏都使用各自的精确日志或画面标志区分更新与维护：更新记为 `needs_update`，服务器维护记为 `skipped`。
-- 检出更新或维护后立即结束本轮主任务，保存日志、截图、进程和窗口等现场证据，再执行 `run_always` 最终截图与清理。
-- 更新和维护都会标记“明日更新”。下一个游戏日启动相应 Runner 后先额外等待 10 分钟；只有 Runner 明确确认已消费这段等待，持久化标志才会清除。
-- GUI 启动点击、启动确认阶段和启动后的日志停滞都有时间或次数上限，不会无限点击或无限等待。
-- 第一次普通失败仍由全局机制完整重试一轮；`skipped` 与 `needs_update` 不进入普通失败重试。
-- 用户取消任务后仍会使用独立清理上下文执行最终截图和外部程序清理。
-- 星穹铁道识别到新版本公告后直接按 `needs_update` 结束本轮，不再点击“好的”继续更新；出现“每日实训未完成”时，即使同时出现“每日实训奖励完成”也不能判定成功。
-
-## 添加其他脚本
-
-在 `steps` 中加入命令执行器：
-
-```json
-{
-  "id": "my_script",
-  "runner": "command",
-  "command": "D:\\GameTools\\script.exe",
-  "args": ["--daily"],
-  "timeout": 900,
-  "retry": 1
-}
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-支持的执行器：
+构建脚本会依次运行测试、便携审计、PyInstaller 正式构建，并将 `config` 与 `resources` 复制到 `dist/GameFlow`。产物可以整体复制到其他 Windows 主机。
 
-- `ldplayer`：启动、重启或关闭指定雷电实例。
-- `adb`：等待设备、启动/停止应用、执行 Android 命令、保存截图。
-- `maa`：运行 maa-cli 自定义任务。
-- `maa_gui`：启动 MAA 桌面版，按上限尝试启动并等待本轮 `AllTasksCompleted` 日志标记。
-- `baas_gui`：启动 BAAS Pro 的 `baas1` 配置，要求本轮工作证据和稳定空队列后再进入奖励核验。
-- `alas_gui`：启动 AzurLaneAutoScript，让其自行启动模拟器和任务；检测本次调度开始后出现 `No task pending`，并等待20秒无新日志才结束本轮。
-- `naruto_shadow`：在雷电内启动“影分身”，依次点击“启动功能”、浮窗和“启动”，并观察结束弹窗或主页停留状态。
-- `naruto_reward_verify`：进入火影“奖励”页，确认每日活跃度达到100且四个日常宝箱均已领取。
-- `gumballs_gui`：启动不思议迷宫 MFAAvalonia 脚本，延迟点击“开始任务”，并按日志连续执行两轮。
-- `maaend_gui`：启动 MaaEnd 的“全套日常”，确认四项主要任务完成后进入截图和清理阶段。
-- `log_gui_daily`：运行绝区零或星穹铁道日志型 GUI，限制启动点击次数并监控启动后日志停滞。
-- `window_screenshot`：在关闭 PC 游戏前保存指定 Windows 游戏窗口截图。
+资源复制由 `config/resource_manifest.json` 控制；测试、缓存和历史日志不会进入产物。新版本先在 `build/release-staging` 完整生成并审计，成功后替换 `dist/GameFlow`，上一版本保留在 `dist/GameFlow.previous`。
 
-## 终末地环境
+## 内置运行时
 
-- 脚本入口：`G:\maazmd\MaaEnd.exe`；游戏入口：`E:\Hypergryph Launcher\games\Endfield Game\Endfield.exe`。
-- 使用 MaaEnd 已配置的“全套日常”，程序启动后优先使用 MaaEnd 自带的自动运行；45秒内没有开始日志时，备用点击底部“开始任务”按钮。
-- MaaEnd 的四项主要任务全部完成并切换到收尾阶段后才算成功，不会把程序打开或任务提交误判成完成。
-- 原 MaaEnd 收尾任务不再直接关闭 `Endfield.exe`。GameFlow 会先保存 `logs/endfield_final.png`，随后关闭终末地和 MaaEnd，因此该截图也会作为独立图片附件加入每日邮件。
-- 最长等待时间为3小时；定时执行默认关闭，可先在控制面板单独运行测试。
+| 工作流 | 内置目录 | 入口 |
+|---|---|---|
+| 明日方舟 | `resources/tools/maa` | `MAA.exe` |
+| 碧蓝档案 | `resources/tools/baas` | `baas.exe` |
+| 碧蓝航线 | `resources/tools/alas` | `Alas.exe` |
+| 火影忍者 | `resources/tools/naruto` | `MFAAvalonia.exe` |
+| 不思议迷宫 | `resources/tools/gumballs` | `MFAAvalonia.exe` |
+| 终末地 | `resources/tools/endfield` | `MaaEnd.exe` |
+| 绝区零 | `resources/tools/zenless` | `OneDragon-Launcher.exe` |
+| 星穹铁道 | `resources/tools/star_rail` | `March7th Launcher.exe` |
+| QQ 阅读测试流程 | `resources/tools/qq_reader` | `MaaQQReaderGUI.exe` |
 
-## 不思议迷宫环境
+ADB 位于 `resources/runtime/adb.exe`。雷电、MuMu 和终末地游戏本体属于宿主机安装，不写入便携的 `config/workflow.json`；首次启动会从环境变量、Program Files 和各本地盘的常见安装目录中自动发现，并保存到 `data/host_settings.json`。
 
-- 雷电实例：`不思议迷宫`，实例编号 `2`，ADB 地址 `emulator-5558`。
-- 脚本入口：`D:\bushiyi\MFAAvalonia.exe`。
-- 模拟器和脚本启动后等待120秒，再按主窗口右上角的固定相对位置点击“开始任务”。
-- 每轮必须先在本次新增日志中出现“用户操作：启动任务”，随后出现“任务已全部完成！”，才算该轮成功；历史日志不会参与判定。
-- 第一轮结束后等待3秒并再次点击“开始任务”。第二轮确认完成后关闭脚本，然后保存 `logs/gumballs_final.png` 并关闭雷电实例2。
-- 最长总等待时间为4小时；点击后180秒仍没有启动日志会直接报错。失败或手动停止时也会执行脚本和模拟器清理。
+自动发现失败或迁移到新电脑后，可用目录或可执行文件重新配置：
 
-## 火影忍者环境
+```powershell
+python .\main.py configure-host --ldplayer "<LDPlayer9目录>" --mumu "<MuMu shell目录>" --endfield "<Endfield.exe或所在目录>"
+```
 
-- 雷电实例：`fire`，实例编号 `0`，ADB 地址 `emulator-5554`。
-- 影分身包名：`com.yy.yfs`；火影忍者包名：`com.tencent.KiHan`。
-- 正常结束时会识别影分身的大型白色结束弹窗并点击“确定”。
-- 影分身启动时若弹出竖屏“功能说明”，程序会先点击其中的“确定”再操作浮窗；竖屏白色弹窗不会再被当成游戏结束。
-- 启动后每隔60秒截图，直到首次识别到火影大厅。
-- 阶段1确认大厅后开始90分钟计时。计时结束后不再进入奖励页检查，直接保存最终截图并关闭雷电实例0。
-- 奖励核验截图：`logs/naruto_activity_check.png`；最终截图：`logs/naruto_final.png`。无论成功或失败都会关闭雷电实例0。
+不带参数执行 `configure-host` 可查看当前发现/保存的路径。流程启动前会验证其声明的宿主机程序；路径无效时会直接报告字段，不会启动自动化脚本。
 
-## 碧蓝航线环境
+## 部署边界
 
-- 脚本入口：`E:\AzurLaneAutoScript\Alas.exe`。
-- 模拟器由 ALAS 自行启动，GameFlow 不配置或控制模拟器地址。
-- 模拟器为MuMu 12主实例 `0`（名称“碧蓝航线”，ADB `127.0.0.1:16384`）。ALAS完成后，GameFlow调用 `D:\Program Files\Netease\MuMu Player 12\shell\MuMuManager.exe control --vmindex 0 shutdown` 关闭该实例。
-- ALAS 官方自动运行保持关闭（`Run: null`）。GameFlow 启动 ALAS 并等待20秒后，自动点击界面顶部的“启动”按钮；优先按控件名称点击，备用窗口相对位置为43%、10.5%。单独打开 ALAS 时不会自动执行任务。
-- 完成依据：本次日志先出现 `Scheduler: Start task`，之后出现 `No task pending`，并保持20秒没有新任务日志。
-- 最长等待时间：2小时。
+模拟器虚拟机、游戏客户端、账号数据及 Windows 图形桌面不是构建资源。目标主机仍需安装雷电或 MuMu；终末地流程还需安装游戏本体。其他 PC 游戏自动化工具继续使用其自身的便携配置或启动器发现游戏。
 
-## 碧蓝档案环境
-
-- 雷电实例：`碧蓝档案`，实例编号 `3`。
-- ADB 地址：`emulator-5560`。
-- BAAS 启动入口：直接使用 `E:\baas\baas-pro\baas.exe`，绕过已经无法稳定拉起窗口的旧外层 `Baas_Windows_V4.exe`。
-- BAAS 配置：`baas1`，已加入 `configs/app.yaml` 的 `auto_start`。
-- BAAS 启动前会清理同程序遗留的旧进程，保证 `auto_start` 在唯一主实例中触发。
-- 如果启动后30秒 `baas1` 日志没有新增，程序会自动操作 BAAS Pro GUI；窗口尚未出现时每30秒重试，最长等待120秒、最多点击8次。按照实际界面先点击左侧 `baas1`（窗口相对位置4%、15%），再点击顶部绿色“启动”（37.4%、10.8%）。
-- BAAS 主步骤必须取得本轮新增的任务、日志或队列变化作为工作证据，并确认 `baas1` 队列稳定为空10秒。队列明确忙碌或状态未知时禁止备用坐标点击，避免把“启动”误点成“停止”或误操作其他窗口。
-- 主步骤结束后进入“工作任务”页核验每日进度和奖励按钮；仍可领取时尝试领取并重新确认，验证完成后再保存最终截图。
-- 最终截图：`logs/blue_archive_final.png`。
-
-碧蓝档案只有同时满足以下条件才会标记成功：本轮存在有效工作证据、队列稳定为空，并且游戏内工作任务奖励核验通过。BAAS 的成功标记必须位于本次“模拟器连接成功/开始执行”之后；检测到候选后继续观察20秒，日志继续追加时取消候选并继续等待，避免 BAAS 尚在执行时被提前关闭。
-
-碧蓝档案定时执行默认关闭。完整手动验证成功后，可将 `blue_archive_daily.trigger.enabled` 改为 `true`。
-- `command`：运行任意命令行脚本或程序。
-- `delay`：可中断等待。
-
-`run_always: true` 表示即使前面的步骤失败也必须执行，适合截图和关闭模拟器。`continue_on_error: true` 表示该步骤失败不阻断后续步骤。
-
-## 数据位置
-
-- `logs/gameflow.log`：完整运行日志。
-- `logs/final.png`：每日流程结束截图。
-- `data/gameflow.db`：运行和步骤历史。
-
-## 每日截图邮件
-
-- 每个游戏都会在关闭模拟器前保存一张游戏内最终截图。碧蓝航线通过 MuMu 12 的 ADB 地址 `127.0.0.1:16384` 截图。
-- 批量“开始每日流程”全部结束后，仅收集本批新生成的截图，转换为适合邮件的清晰JPEG，并作为多张独立图片附件直接发送到 `26142328@qq.com`，不再生成ZIP。
-- QQ 邮箱发件凭据不会写进配置文件。当前使用 `26142328@qq.com` 自发自收，通过 `smtp.qq.com:465` SSL 发信；Windows 用户环境变量保存发件地址和SMTP授权码。
-- 可直接双击 `configure_email.bat`，按提示输入 QQ 邮箱地址和SMTP授权码；授权码输入时不会显示在窗口中。
-- 未配置凭据或发送失败时，原始最终截图仍保留在 `logs`，控制面板完成消息和日志会显示具体原因。
-
-如果某一步找不到程序、超时或返回非零退出码，控制面板和日志会显示明确原因。
+版本检查、自动更新、公告/推广界面、邮件发送、远程图片和定时后台任务已从 GameFlow 运行路径移除。第三方运行时的活动配置也已关闭更新检查；运行时不会替换内置文件。
